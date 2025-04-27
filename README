@@ -1,0 +1,26 @@
+This is the README file for aCG, a suite of GPU-accelerated iterative
+linear solvers based on the conjugate gradient (CG) method, supporting
+NVIDIA and AMD GPUs, as well as multi-GPU systems with GPU-aware MPI,
+NCCL, RCCL or NVSHMEM.
+
+For NVIDIA GPUs, CUDA implementations of CG and pipelined CG are
+provided. Communication is performed by the host CPU using GPU-aware
+MPI, NCCL or NVSHMEM, or by the GPU using NVSHMEM device-initiated
+communication.
+
+For AMD GPUs, HIP implementations of CG and pipelined CG are provided.
+Communication is performed by the host CPU with GPU-aware MPI or RCCL.
+A single-GPU HIP version of a monolithic, device-side CG solver is
+also provided.
+
+See the file INSTALL for instructions on how to build and install.
+
+aCG is free software, available under a permissive software license.
+See the file LICENSE for copying conditions.
+
+--
+Copyright 2025 Koç University and Simula Research Laboratory
+
+Copying and distribution of this file, with or without modification,
+are permitted provided the copyright notice and this notice are
+preserved.

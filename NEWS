@@ -1,0 +1,23 @@
+* Noteworthy changes in release 1.0.0 (2025-04-26)
+
+This is the initial release of aCG, which provides GPU-accelerated
+iterative linear solvers based on the conjugate gradient (CG) method.
+The solvers support NVIDIA and AMD GPUs, and multi-GPU systems with
+GPU-aware MPI, NCCL/RCCL or NVSHMEM.
+
+For NVIDIA GPUs, CUDA implementations of CG and pipelined CG are
+provided. Communication is performed by the host CPU using GPU-aware
+MPI, NCCL or NVSHMEM, or by the GPU using NVSHMEM device-initiated
+communication.
+
+For AMD GPUs, HIP implementations of CG and pipelined CG are provided.
+Communication is performed by the host CPU using GPU-aware MPI or RCCL
+communication.  A single-GPU HIP version of the monolithic,
+device-side CG solver is also provided.
+
+--
+Copyright 2025 Koç University and Simula Research Laboratory
+
+Copying and distribution of this file, with or without modification,
+are permitted provided the copyright notice and this notice are
+preserved.

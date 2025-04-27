@@ -1,0 +1,111 @@
+Installation Instructions
+*************************
+
+    Copyright 2025 Koç University and Simula Research Laboratory
+
+    Copying and distribution of this file, with or without
+    modification, are permitted provided the copyright notice and this
+    notice are preserved.
+
+
+Software dependencies
+=====================
+
+To install aCG the following minimum software dependencies must be satisfied:
+
+* CMake 3.12 or newer
+
+* A C/C++ compiler compatible with C++-17
+
+* For NVIDIA GPUs: NVIDIA CUDA Compiler (NVCC), cuBLAS and cuSPARSE from CUDA Toolkit 11.6 or newer
+
+* For AMD GPUs: HIP C++ compiler, hipBLAS and hipSPARSE from ROCm 6.0.0 or newer
+
+* A GPU-aware MPI library (e.g., HPC-X from NVIDIA HPC SDK, or Cray MPICH)
+
+The following optional software packages may be needed to enable some features:
+
+* METIS 5.1.0 is needed to partition matrices when using multiple GPUs
+
+* NVIDIA Collective Communications Library (NCCL) version 2.18.5 or
+  newer is needed to use NCCL-based communication for NVIDIA GPUs
+
+* ROCm Collective Communications Library (RCCL) version 2.18.3 or
+  newer is needed to use RCCL-based communication for AMD GPUs
+
+* NVSHMEM version 2.10.0 or newer is needed to use CPU- or
+  GPU-initiated one-sided communication for NVIDIA GPUs
+
+* PETSc 3.17 or newer with CUDA or HIP support enabled is needed to
+  use PETSc's CG/pipelined CG solvers
+
+* zlib is needed to use gzip-compressed Matrix Market files as input
+
+* If the compiler supports OpenMP, then it can be enabled to use
+  multiple threads to speed up some preprocessing steps.
+
+
+Basic Installation
+==================
+
+The CMake build system is used to install aCG.  A basic installation
+can be performed by first creating a build directory, e.g., 'build/':
+
+ $ mkdir build
+ $ cd build
+
+From the build directory, the command
+
+ $ cmake ../cuda
+
+builds the CUDA application for NVIDIA GPUs, or
+
+ $ cmake ../hip
+
+builds the HIP application for AMD GPUs.
+
+Once the cmake configuration is finished, use `make' to compile the
+application:
+
+ $ make
+
+
+Installation options
+====================
+
+The usual options used by CMake to manage installation are supported.
+In addition, the following options are useful for aCG:
+
+* CMAKE_BUILD_TYPE should be set to Release to enable optimisations
+  when conducting performance benchmarks.
+
+* CMAKE_CUDA_ARCHITECTURES can be used to set the CUDA architecture
+  when compiling CUDA kernels. By default, the following architectures
+  are included: 70 (Volta), 75 (Turing), 80 (Ampere) and 90 (Hopper).
+
+* CMAKE_HIP_FLAGS can be used to set the HIP architecture that is used
+  to compile HIP kernels.  For example, for AMD Instinct MI250x, it is
+  recommended to set -DCMAKE_HIP_FLAGS="--offload-arch=gfx90a".
+
+* ACG_ENABLE_PROFILING can be set to enable detailed CUDA/HIP-based
+  event profiling. This can be used to print detailed information
+  about time spent in different GPU kernels for some of the CG
+  solvers.
+
+* IDXSIZE can be set to 64 to enable the use of 64-bit integers to
+  index matrix rows and columns. This may be needed for matrices with
+  more than 2 billion rows/columns.
+
+Other options are used to specify locations of third-party libraries:
+
+* METIS_DIR is used to specify the location of the METIS library.
+  Alternatively, METIS_INCLUDE_DIR and METIS_LIB_DIR can be set to
+  directories containing the METIS header files and library,
+  respectively.
+
+* NCCL_HOME or NCCL_ROOT are used to specify the location of the NCCL
+  installation. These may also be set as environment variables.
+
+* NVSHMEM_DIR is used to specify the location of the NVSHMEM
+  installation. The environment variables NVSHMEM_HOME or
+  NVSHMEM_PREFIX may also be used.
