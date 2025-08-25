@@ -100,7 +100,7 @@ if (MPI_FOUND)
     add_definitions(-DACG_HAVE_MPI)
 endif ()
 
-find_package(METIS REQUIRED)
+find_package(METIS)
 if (METIS_FOUND)
   add_definitions(-DACG_HAVE_METIS)
   INCLUDE(CheckTypeSize)
