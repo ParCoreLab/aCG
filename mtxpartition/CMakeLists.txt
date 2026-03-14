@@ -60,6 +60,8 @@ set(PROJECT_SOURCES
 	../acg/symcsrmatrix.h
 	../acg/vector.c
 	../acg/vector.h
+  ../acg/prefixsum.c
+  ../acg/prefixsum.h
         mtxpartition.c
         )
 
