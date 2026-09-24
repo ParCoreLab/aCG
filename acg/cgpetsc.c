@@ -69,6 +69,7 @@ static int acgpetsc_init(
     const struct acgsymcsrmatrix * A,
     PetscDeviceType devicetype,
     KSPType ksptype,
+    PCType pctype,
     MPI_Comm comm)
 {
     int err;
@@ -177,27 +178,23 @@ static int acgpetsc_init(
 
     /* set up solver */
     err = KSPCreate(comm, &petsc->ksp); CHKERRQ(err);
-
     err = KSPSetType(petsc->ksp, ksptype); CHKERRQ(err);
     err = KSPSetNormType(petsc->ksp, KSP_NORM_UNPRECONDITIONED); CHKERRQ(err);
     err = KSPConvergedDefaultSetUIRNorm(petsc->ksp); CHKERRQ(err);
     err = KSPSetOperators(petsc->ksp, petsc->A, petsc->A); CHKERRQ(err);
-    err = KSPSetUp(petsc->ksp); CHKERRQ(err);
-    /* err = KSPSetFromOptions(petsc->ksp); */
 
     /* set up preconditioner */
-    err = PCCreate(comm, &petsc->pc); CHKERRQ(err);
-    err = PCSetType(petsc->pc, PCNONE); CHKERRQ(err);
-    err = PCSetOperators(petsc->pc, petsc->A, petsc->A);
-    err = KSPSetPC(petsc->ksp, petsc->pc); CHKERRQ(err);
-    err = PCSetUp(petsc->pc); CHKERRQ(err);
+    err = KSPGetPC(petsc->ksp, &petsc->pc); CHKERRQ(err);
+    err = PCSetType(petsc->pc, pctype); CHKERRQ(err);
+
+    /* set up KSP (after PC is configured) */
+    err = KSPSetUp(petsc->ksp); CHKERRQ(err);
     return ACG_SUCCESS;
 }
 
 void acgpetsc_free(
     struct acgpetsc * petsc)
 {
-    PCDestroy(&petsc->pc);
     KSPDestroy(&petsc->ksp);
     VecDestroy(&petsc->x);
     VecDestroy(&petsc->b);
@@ -235,6 +232,7 @@ int acgsolverpetsc_init(
     const struct acgsymcsrmatrix * A,
     enum acgdevicetype acgdevicetype,
     enum acgpetscksptype acgpetscksptype,
+    enum acgpetscpctype acgpetscpctype,
     const struct acgcomm * comm)
 {
 #ifndef ACG_HAVE_PETSC
@@ -250,12 +248,19 @@ int acgsolverpetsc_init(
     KSPType petscksptype;
     if (acgpetscksptype == PETSC_KSPCG) petscksptype = KSPCG;
     else if (acgpetscksptype == PETSC_KSPPIPECG) petscksptype = KSPPIPECG;
+    else if (acgpetscksptype == PETSC_KSPBCGS) petscksptype = KSPBCGS;
+    else if (acgpetscksptype == PETSC_KSPPIPEBCGS) petscksptype = KSPPIPEBCGS;
+    else return ACG_ERR_INVALID_VALUE;
+    PCType petscpctype;
+    if (acgpetscpctype == PETSC_PCNONE) petscpctype = PCNONE;
+    else if (acgpetscpctype == PETSC_PCJACOBI) petscpctype = PCJACOBI;
     else return ACG_ERR_INVALID_VALUE;
     cg->petsc = malloc(sizeof(*cg->petsc));
     if (!cg->petsc) return ACG_ERR_ERRNO;
-    err = acgpetsc_init(cg->petsc, A, petscdevicetype, petscksptype, comm->mpicomm);
+    err = acgpetsc_init(cg->petsc, A, petscdevicetype, petscksptype, petscpctype, comm->mpicomm);
     if (err) { free(cg->petsc); return err; }
     cg->ksptype = acgpetscksptype;
+    cg->pctype = acgpetscpctype;
     cg->maxits = 0;
     cg->diffatol = 0;
     cg->diffrtol = 0;
@@ -394,6 +399,25 @@ int acgsolverpetsc_solve(
     err = KSPGetResidualNorm(petsc->ksp, &cg->rnrm2); CHKERRQ(err);
     KSPConvergedReason reason;
     err = KSPGetConvergedReason(petsc->ksp, &reason); CHKERRQ(err);
+
+    /* Surface PETSc's own diagnostic for why the KSP stopped. In
+     * fixed-iteration benchmark mode KSPSetErrorIfNotConverged() is
+     * disabled, so a breakdown (e.g. KSP_DIVERGED_BREAKDOWN,
+     * KSP_DIVERGED_NANORINF or KSP_DIVERGED_INDEFINITE_PC) makes the
+     * solver return early without raising a PETSc error. Print the
+     * converged reason so the cause of early termination is visible. */
+    if (reason < 0 || (residualatol == 0 && residualrtol == 0 && its != maxits)) {
+        PetscViewer viewer = PETSC_VIEWER_STDERR_(PetscObjectComm((PetscObject) petsc->ksp));
+        const char * reasonstr = KSPConvergedReasons[reason];
+        err = PetscViewerASCIIPrintf(
+            viewer,
+            "%s: KSP stopped after %d of %d iterations with residual norm %.*g: "
+            "%s (KSPConvergedReason %d)\n",
+            __func__, (int) its, maxits, DBL_DIG, (double) cg->rnrm2,
+            reasonstr ? reasonstr : "unknown", (int) reason); CHKERRQ(err);
+        err = KSPConvergedReasonView(petsc->ksp, viewer); CHKERRQ(err);
+    }
+
     if (residualatol == 0 && residualrtol == 0 && its == maxits) return ACG_SUCCESS;
     if (reason < 0) return ACG_ERR_NOT_CONVERGED;
     return ACG_SUCCESS;

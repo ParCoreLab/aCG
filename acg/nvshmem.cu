@@ -41,6 +41,8 @@
 #include <nvshmemx.h>
 #endif
 
+#include <string.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -51,12 +53,15 @@ extern "C" {
  * library handles
  */
 
+static nvshmem_team_t acg_nvshmem_team_allreduce_handle = NVSHMEM_TEAM_INVALID;
+
 nvshmem_team_t acg_nvshmem_team(acg_nvshmem_team_t team)
 {
     if (team == ACG_NVSHMEM_TEAM_INVALID) return NVSHMEM_TEAM_INVALID;
     else if (team == ACG_NVSHMEM_TEAM_WORLD) return NVSHMEM_TEAM_WORLD;
     else if (team == ACG_NVSHMEM_TEAM_SHARED) return NVSHMEM_TEAM_SHARED;
     else if (team == ACG_NVSHMEMX_TEAM_NODE) return NVSHMEMX_TEAM_NODE;
+    else if (team == ACG_NVSHMEM_TEAM_ALLREDUCE) return acg_nvshmem_team_allreduce_handle;
     else return team;
 }
 
@@ -96,6 +101,37 @@ void acg_nvshmem_sync_all(void) { nvshmem_sync_all(); }
 void acg_nvshmemx_sync_all_on_stream(cudaStream_t stream) { nvshmemx_sync_all_on_stream(stream); }
 int acg_nvshmem_double_sum_reduce(acg_nvshmem_team_t team, double *dest, const double *source, size_t nreduce) { return nvshmem_double_sum_reduce(acg_nvshmem_team(team), dest, source, nreduce); }
 int acg_nvshmemx_double_sum_reduce_on_stream(acg_nvshmem_team_t team, double *dest, const double *source, size_t nreduce, cudaStream_t stream) { return nvshmemx_double_sum_reduce_on_stream(acg_nvshmem_team(team), dest, source, nreduce, stream); }
+
+/*
+ * team management
+ */
+
+int acg_nvshmem_team_split_strided(acg_nvshmem_team_t parent, int start, int stride, int size, int num_contexts, acg_nvshmem_team_t *new_team)
+{
+    nvshmem_team_config_t config;
+    memset(&config, 0, sizeof(config));
+    config.num_contexts = num_contexts;
+    long mask = 0;
+#ifdef NVSHMEM_TEAM_NUM_CONTEXTS
+    mask = NVSHMEM_TEAM_NUM_CONTEXTS;
+#endif
+    nvshmem_team_t native_team = NVSHMEM_TEAM_INVALID;
+    int err = nvshmem_team_split_strided(
+        acg_nvshmem_team(parent), start, stride, size, &config, mask, &native_team);
+    if (err) return err;
+    acg_nvshmem_team_allreduce_handle = native_team;
+    *new_team = ACG_NVSHMEM_TEAM_ALLREDUCE;
+    return 0;
+}
+
+int acg_nvshmem_team_destroy(acg_nvshmem_team_t team)
+{
+    if (team == ACG_NVSHMEM_TEAM_ALLREDUCE) {
+        nvshmem_team_destroy(acg_nvshmem_team_allreduce_handle);
+        acg_nvshmem_team_allreduce_handle = NVSHMEM_TEAM_INVALID;
+    }
+    return 0;
+}
 #endif
 
 #ifdef __cplusplus

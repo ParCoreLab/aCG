@@ -41,118 +41,288 @@
 #endif
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
-int acgsolverhip_init_constants(
-    double ** d_minus_one,
-    double ** d_one,
-    double ** d_zero);
+    int acgsolverhip_init_constants(
+        double **d_minus_one,
+        double **d_one,
+        double **d_zero);
 
-int acgsolverhip_alpha(
-    double * alpha,
-    double * minus_alpha,
-    const double * rnrm2sqr,
-    const double * pdott);
+    int acgsolverhip_alpha(
+        double *alpha,
+        double *minus_alpha,
+        const double *rnrm2sqr,
+        const double *pdott);
 
-int acgsolverhip_beta(
-    double * beta,
-    const double * rnrm2sqr,
-    const double * rnrm2sqr_prev);
+    int acgsolverhip_beta(
+        double *beta,
+        const double *rnrm2sqr,
+        const double *rnrm2sqr_prev);
 
-int acgsolverhip_daxpy_alpha(
-    int n,
-    const double * d_rnrm2sqr,
-    const double * d_pdott,
-    const double * d_x,
-    double * d_y);
+    int acgsolverhip_daxpy_alpha(
+        int n,
+        const double *d_rnrm2sqr,
+        const double *d_pdott,
+        const double *d_x,
+        double *d_y);
 
-int acgsolverhip_daxpy_minus_alpha(
-    int n,
-    const double * d_rnrm2sqr,
-    const double * d_pdott,
-    const double * d_x,
-    double * d_y);
+    int acgsolverhip_daxpy_minus_alpha(
+        int n,
+        const double *d_rnrm2sqr,
+        const double *d_pdott,
+        const double *d_x,
+        double *d_y);
 
 #ifdef ACG_HAVE_HIP
-int acgsolverhip_pipelined_daxpy_fused(
-    int n,
-    const double * d_gamma,
-    double * d_gamma_prev,
-    const double * d_delta,
-    const double * d_q,
-    double * d_p,
-    double * d_r,
-    double * d_t,
-    double * d_x,
-    double * d_z,
-    double * d_w,
-    double * d_alpha_prev,
-    hipStream_t stream);
+    int acgsolverhip_pipelined_daxpy_fused(
+        int n,
+        const double *d_gamma,
+        double *d_gamma_prev,
+        const double *d_delta,
+        const double *d_q,
+        double *d_p,
+        double *d_r,
+        double *d_t,
+        double *d_x,
+        double *d_z,
+        double *d_w,
+        double *d_alpha_prev,
+        hipStream_t stream);
+
+    int acgsolverhip_preconditioned_pipelined_daxpy_fused(
+        int num,
+        int k,
+        const double *d_gamma,
+        double *d_gamma_prev,
+        const double *d_delta,
+        double *d_p,
+        double *d_r,
+        double *d_t,
+        double *d_x,
+        double *d_z,
+        double *d_w,
+        double *d_q,
+        double *d_n,
+        double *d_m,
+        double *d_u,
+        double *d_alpha_prev,
+        hipStream_t stream);
+
+    int acgsolverhip_preconditioned_daxpy_fused(
+        int num,
+        const double *d_gamma,
+        double *d_gamma_prev,
+        const double *d_delta,
+        double *d_p,
+        double *d_r,
+        double *d_t,
+        double *d_x,
+        hipStream_t stream);
+
+    /*
+     * Preconditioned BiCGStab vector updates (see cg-kernels-hip.hip).
+     */
+    int acgsolverhip_bicgstab_p_update(
+        int n,
+        int k,
+        const double *d_rho,
+        const double *d_rho_prev,
+        const double *d_alpha,
+        const double *d_omega,
+        double *d_p,
+        const double *d_r,
+        const double *d_v,
+        hipStream_t stream);
+
+    int acgsolverhip_bicgstab_s_update(
+        int n,
+        double *d_alpha,
+        const double *d_rho,
+        const double *d_rhat_v,
+        double *d_s,
+        const double *d_r,
+        const double *d_v,
+        hipStream_t stream);
+
+    int acgsolverhip_bicgstab_xr_update(
+        int n,
+        double *d_omega,
+        double *d_rho_prev,
+        const double *d_num,
+        const double *d_den,
+        const double *d_rho,
+        const double *d_alpha,
+        double *d_x,
+        const double *d_y,
+        const double *d_z,
+        double *d_r,
+        const double *d_s,
+        const double *d_t,
+        hipStream_t stream);
+
+    int acgsolverhip_bicgstab_x_halfstep(
+        int n,
+        const double *d_alpha,
+        double *d_x,
+        const double *d_y,
+        hipStream_t stream);
+
+    /*
+     * Pipelined (communication-hiding) BiCGStab vector updates
+     * (see cg-kernels-hip.hip).
+     */
+    int acgsolverhip_pipelined_bicgstab_psz_update(
+        int n,
+        const double *d_beta,
+        const double *d_omega,
+        const double *d_r,
+        const double *d_w,
+        const double *d_t,
+        double *d_p,
+        double *d_s,
+        double *d_z,
+        const double *d_v,
+        hipStream_t stream);
+
+    int acgsolverhip_pipelined_bicgstab_qy_update(
+        int n,
+        const double *d_alpha,
+        const double *d_r,
+        const double *d_w,
+        const double *d_s,
+        const double *d_z,
+        double *d_q,
+        double *d_y,
+        hipStream_t stream);
+
+    int acgsolverhip_pipelined_bicgstab_xrw_update(
+        int n,
+        double *d_omega,
+        const double *d_g1,
+        const double *d_g2,
+        const double *d_alpha,
+        const double *d_p,
+        const double *d_q,
+        const double *d_y,
+        const double *d_t,
+        const double *d_v,
+        double *d_x,
+        double *d_r,
+        double *d_w,
+        hipStream_t stream);
+
+    int acgsolverhip_pipelined_bicgstab_scalars(
+        double *d_beta,
+        double *d_alpha,
+        double *d_rho,
+        const double *d_omega,
+        const double *d_d1,
+        const double *d_d2,
+        const double *d_d3,
+        const double *d_d4,
+        hipStream_t stream);
+
+    int acgsolverhip_jacobi_preconditioner(
+        int n,
+        const double *d_diag,
+        double *d_M_inv,
+        hipStream_t stream);
+
+    int acgsolverhip_apply_jacobi_preconditioner(
+        int n,
+        const double *M_inv,
+        const double *r,
+        double *d_z,
+        hipStream_t stream);
+
+    int acgsolverhip_jacobi_extract_diagonal(
+        int n,
+        const int *d_rowptr,
+        const int *d_colidx,
+        const double *d_a,
+        double *d_diag,
+        hipStream_t stream);
 #endif
 
-int acgsolverhip_daypx_beta(
-    int n,
-    const double * d_rnrm2sqr,
-    const double * d_rnrm2sqr_prev,
-    double * d_y,
-    const double * d_x);
+    int acgsolverhip_daypx_beta(
+        int n,
+        const double *d_rnrm2sqr,
+        const double *d_rnrm2sqr_prev,
+        double *d_y,
+        const double *d_x);
 
-int acgsolverhip_csrgemv_merge_startrows(
-    acgidx_t n,
-    const acgidx_t * __restrict d_rowptr,
-    acgidx_t nstartrows,
-    acgidx_t * d_startrows);
+#ifdef ACG_HAVE_HIP
+    int acgsolverhip_csrgemv_merge_startrows(
+        acgidx_t n,
+        const acgidx_t *__restrict d_rowptr,
+        acgidx_t nstartrows,
+        acgidx_t *d_startrows,
+        hipStream_t stream);
 
-int acgsolverhip_csrgemv_merge(
-    acgidx_t n,
-    double * __restrict d_y,
-    const double * __restrict d_x,
-    const acgidx_t * __restrict d_rowptr,
-    const acgidx_t * __restrict d_colidx,
-    const double * __restrict d_a,
-    double alpha,
-    acgidx_t nstartrows,
-    const acgidx_t * __restrict d_startrows);
+    int acgsolverhip_csrgemv_merge(
+        acgidx_t n,
+        double *__restrict d_y,
+        const double *__restrict d_x,
+        const acgidx_t *__restrict d_rowptr,
+        const acgidx_t *__restrict d_colidx,
+        const double *__restrict d_a,
+        double alpha,
+        double beta,
+        acgidx_t nstartrows,
+        const acgidx_t *__restrict d_startrows,
+        hipStream_t stream);
 
-/**
- * ‘acgsolverhip_solve_device()’ solves the given linear system,
- * Ax=b, using the conjugate gradient method. The linear system may be
- * distributed across multiple processes and communication is handled
- * using device-initiated rocSHMEM.
- *
- * The solver must already have been configured with ‘acgsolverhip_init()’
- * for a linear system Ax=b, and the dimensions of the vectors b and x
- * must match the number of columns and rows of A, respectively.
- *
- * The stopping criterion are:
- *
- *  - ‘maxits’, the maximum number of iterations to perform
- *  - ‘diffatol’, an absolute tolerance for the change in solution, ‖δx‖ < γₐ
- *  - ‘diffrtol’, a relative tolerance for the change in solution, ‖δx‖/‖x₀‖ < γᵣ
- *  - ‘residualatol’, an absolute tolerance for the residual, ‖b-Ax‖ < εₐ
- *  - ‘residualrtol’, a relative tolerance for the residual, ‖b-Ax‖/‖b-Ax₀‖ < εᵣ
- *
- * The iterative solver converges if
- *
- *   ‖δx‖ < γₐ, ‖δx‖ < γᵣ‖x₀‖, ‖b-Ax‖ < εₐ or ‖b-Ax‖ < εᵣ‖b-Ax₀‖.
- *
- * To skip the convergence test for any one of the above stopping
- * criterion, the associated tolerance may be set to zero.
- */
-ACG_API int acgsolverhip_solve_device(
-    struct acgsolverhip * cg,
-    const struct acgsymcsrmatrix * A,
-    const struct acgvector * b,
-    struct acgvector * x,
-    int maxits,
-    double diffatol,
-    double diffrtol,
-    double residualatol,
-    double residualrtol,
-    int warmup,
-    struct acgcomm * comm,
-    int * errcode);
+    /**
+     * 'acgsolverhip_dcopy()' copies a device vector.
+     * y[i] = x[i] for i = 0, ..., n-1
+     */
+    int acgsolverhip_dcopy(
+        acgidx_t n,
+        double *d_y,
+        const double *d_x,
+        hipStream_t stream);
+#endif
+
+    /**
+     * ‘acgsolverhip_solve_device()’ solves the given linear system,
+     * Ax=b, using the conjugate gradient method. The linear system may be
+     * distributed across multiple processes and communication is handled
+     * using device-initiated rocSHMEM.
+     *
+     * The solver must already have been configured with ‘acgsolverhip_init()’
+     * for a linear system Ax=b, and the dimensions of the vectors b and x
+     * must match the number of columns and rows of A, respectively.
+     *
+     * The stopping criterion are:
+     *
+     *  - ‘maxits’, the maximum number of iterations to perform
+     *  - ‘diffatol’, an absolute tolerance for the change in solution, ‖δx‖ < γₐ
+     *  - ‘diffrtol’, a relative tolerance for the change in solution, ‖δx‖/‖x₀‖ < γᵣ
+     *  - ‘residualatol’, an absolute tolerance for the residual, ‖b-Ax‖ < εₐ
+     *  - ‘residualrtol’, a relative tolerance for the residual, ‖b-Ax‖/‖b-Ax₀‖ < εᵣ
+     *
+     * The iterative solver converges if
+     *
+     *   ‖δx‖ < γₐ, ‖δx‖ < γᵣ‖x₀‖, ‖b-Ax‖ < εₐ or ‖b-Ax‖ < εᵣ‖b-Ax₀‖.
+     *
+     * To skip the convergence test for any one of the above stopping
+     * criterion, the associated tolerance may be set to zero.
+     */
+    ACG_API int acgsolverhip_solve_device(
+        struct acgsolverhip *cg,
+        const struct acgsymcsrmatrix *A,
+        const struct acgvector *b,
+        struct acgvector *x,
+        int maxits,
+        double diffatol,
+        double diffrtol,
+        double residualatol,
+        double residualrtol,
+        int warmup,
+        struct acgcomm *comm,
+        int *errcode);
 
 #ifdef __cplusplus
 }

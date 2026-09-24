@@ -35,6 +35,7 @@
 
 #define _GNU_SOURCE
 
+#include "acg/cg-kernels-hip.h"
 #include "acg/config.h"
 #include "acg/cghip.h"
 #include "acg/cgpetsc.h"
@@ -121,8 +122,17 @@ enum acgsolvertype
     acgsolver_acg,             /* native CG */
     acgsolver_acg_pipelined,   /* native CG (pipelined) */
     acgsolver_acg_device,      /* native device-side CG */
-    acgsolver_petsc,           /* PETSc CG */
-    acgsolver_petsc_pipelined, /* PETSc CG (pipelined) */
+    acgsolver_acg_preconditioned,                  /* native Preconditioned CG */
+    acgsolver_acg_pipelined_preconditioned,        /* native Pipelined PCG */
+    acgsolver_acg_preconditioned_bicgstab,         /* native Preconditioned BiCGStab */
+    acgsolver_acg_pipelined_bicgstab,              /* native Pipelined BiCGStab (unpreconditioned) */
+    acgsolver_acg_pipelined_bicgstab_rr,           /* native Pipelined BiCGStab + residual replacement */
+    acgsolver_petsc,                          /* PETSc CG */
+    acgsolver_petsc_pipelined,                /* PETSc CG (pipelined) */
+    acgsolver_petsc_preconditioned,           /* PETSc Preconditioned CG */
+    acgsolver_petsc_pipelined_preconditioned, /* PETSc Pipelined PCG */
+    acgsolver_petsc_bicgstab,                 /* PETSc BiCGStab */
+    acgsolver_petsc_pipelined_bicgstab,       /* PETSc Pipelined BiCGStab */
 };
 
 /**
@@ -133,8 +143,17 @@ const char * acgsolvertypestr(enum acgsolvertype solvertype)
     if (solvertype == acgsolver_acg) { return "acg"; }
     else if (solvertype == acgsolver_acg_pipelined) { return "acg-pipelined"; }
     else if (solvertype == acgsolver_acg_device) { return "acg-device"; }
+    else if (solvertype == acgsolver_acg_preconditioned) { return "acg-preconditioned"; }
+    else if (solvertype == acgsolver_acg_pipelined_preconditioned) { return "acg-pipelined-preconditioned"; }
+    else if (solvertype == acgsolver_acg_preconditioned_bicgstab) { return "acg-preconditioned-bicgstab"; }
+    else if (solvertype == acgsolver_acg_pipelined_bicgstab) { return "acg-pipelined-bicgstab"; }
+    else if (solvertype == acgsolver_acg_pipelined_bicgstab_rr) { return "acg-pipelined-bicgstab-rr"; }
     else if (solvertype == acgsolver_petsc) { return "petsc"; }
     else if (solvertype == acgsolver_petsc_pipelined) { return "petsc-pipelined"; }
+    else if (solvertype == acgsolver_petsc_preconditioned) { return "petsc-preconditioned"; }
+    else if (solvertype == acgsolver_petsc_pipelined_preconditioned) { return "petsc-pipelined-preconditioned"; }
+    else if (solvertype == acgsolver_petsc_bicgstab) { return "petsc-bicgstab"; }
+    else if (solvertype == acgsolver_petsc_pipelined_bicgstab) { return "petsc-pipelined-bicgstab"; }
     else { return "unknown"; }
 }
 
@@ -340,17 +359,23 @@ static void program_options_print_help(
     fprintf(f, "  --seed=N              random number seed. [0]\n");
     fprintf(f, "\n");
     fprintf(f, " Solver options:\n");
-    fprintf(f, "  --solver TYPE         acg, acg-pipelined, acg-device or petsc. [acg]\n");
+    fprintf(f, "  --solver TYPE         acg, acg-pipelined, acg-device, acg-preconditioned,\n");
+    fprintf(f, "                        acg-pipelined-preconditioned, acg-preconditioned-bicgstab,\n");
+    fprintf(f, "                        acg-pipelined-bicgstab, acg-pipelined-bicgstab-rr, petsc,\n");
+    fprintf(f, "                        petsc-bicgstab or petsc-pipelined-bicgstab. [acg]\n");
     fprintf(f, "  --max-iterations N    maximum number of iterations. [100]\n");
     fprintf(f, "  --diff-atol TOL       stopping criterion for difference in solution iterates, ‖xₖ₊₁-xₖ‖ < TOL. [0]\n");
     fprintf(f, "  --diff-rtol TOL       stopping criterion for relative difference in solution iterates, ‖xₖ₊₁-xₖ‖/‖x₀‖ < TOL. [0]\n");
     fprintf(f, "  --residual-atol TOL   stopping criterion for residual norm, ‖b-Ax‖ < TOL. [0]\n");
     fprintf(f, "  --residual-rtol TOL   stopping criterion for relative residual norm, ‖b-Ax‖/‖b‖ < TOL. [1e-9]\n");
+    fprintf(f, "  --preconditioner=N    preconditioner option for preconditioned CG variants. [0]\n");
     fprintf(f, "  --epsilon TOL         add TOL to the diagonal of A. [0]\n");
     fprintf(f, "  --warmup N            perform N warmup iterations. [10]\n");
     fprintf(f, "\n");
     fprintf(f, " Communication library options:\n");
-    fprintf(f, "  --comm TYPE           none, mpi, rccl or rocshmem. [mpi]\n");
+    fprintf(f, "  --comm TYPE           none, mpi, rccl, rccl-split or rocshmem. [mpi]\n");
+    fprintf(f, "  --number-allreduce-cta N  number of CTAs for allreduce (rccl-split). [2]\n");
+    fprintf(f, "  --number-p2p-cta N   number of CTAs for P2P communication (rccl-split). [16]\n");
     fprintf(f, "\n");
     fprintf(f, " Solver verification options:\n");
     fprintf(f, "  --manufactured-solution  Use a manufactured solution and right-hand side.\n");
@@ -443,6 +468,11 @@ struct program_options
 
     /* communication library options */
     enum acgcommtype commtype;
+    int number_allreduce_cta;
+    int number_p2p_cta;
+
+    /* preconditioner options */
+    int preconditioner;
 
     /* solver verification options */
     int manufactured_solution;
@@ -487,6 +517,11 @@ static int program_options_init(
 
     /* communication library options */
     args->commtype = acgcomm_mpi;
+    args->number_allreduce_cta = 2;
+    args->number_p2p_cta = 16;
+
+    /* preconditioner options */
+    args->preconditioner = 0;
 
     /* solver verification options */
     args->manufactured_solution = 0;
@@ -588,10 +623,28 @@ static int parse_program_options(
                 args->solvertype = acgsolver_acg_pipelined;
             } else if (strcasecmp(s, "acg-device") == 0) {
                 args->solvertype = acgsolver_acg_device;
+            } else if (strcasecmp(s, "acg-preconditioned") == 0) {
+                args->solvertype = acgsolver_acg_preconditioned;
+            } else if (strcasecmp(s, "acg-pipelined-preconditioned") == 0) {
+                args->solvertype = acgsolver_acg_pipelined_preconditioned;
+            } else if (strcasecmp(s, "acg-preconditioned-bicgstab") == 0) {
+                args->solvertype = acgsolver_acg_preconditioned_bicgstab;
+            } else if (strcasecmp(s, "acg-pipelined-bicgstab") == 0) {
+                args->solvertype = acgsolver_acg_pipelined_bicgstab;
+            } else if (strcasecmp(s, "acg-pipelined-bicgstab-rr") == 0) {
+                args->solvertype = acgsolver_acg_pipelined_bicgstab_rr;
             } else if (strcasecmp(s, "petsc") == 0) {
                 args->solvertype = acgsolver_petsc;
             } else if (strcasecmp(s, "petsc-pipelined") == 0) {
                 args->solvertype = acgsolver_petsc_pipelined;
+            } else if (strcasecmp(s, "petsc-preconditioned") == 0) {
+                args->solvertype = acgsolver_petsc_preconditioned;
+            } else if (strcasecmp(s, "petsc-pipelined-preconditioned") == 0) {
+                args->solvertype = acgsolver_petsc_pipelined_preconditioned;
+            } else if (strcasecmp(s, "petsc-bicgstab") == 0) {
+                args->solvertype = acgsolver_petsc_bicgstab;
+            } else if (strcasecmp(s, "petsc-pipelined-bicgstab") == 0) {
+                args->solvertype = acgsolver_petsc_pipelined_bicgstab;
             } else { return EINVAL; }
             (*nargs)++; argv++; continue;
         }
@@ -697,9 +750,44 @@ static int parse_program_options(
                 args->commtype = acgcomm_mpi;
             } else if (strcasecmp(s, "rccl") == 0) {
                 args->commtype = acgcomm_rccl;
+            } else if (strcasecmp(s, "rccl-split") == 0) {
+                args->commtype = acgcomm_rccl_split;
             } else if (strcasecmp(s, "rocshmem") == 0) {
                 args->commtype = acgcomm_rocshmem;
             } else { return EINVAL; }
+            (*nargs)++; argv++; continue;
+        }
+        if (strstr(argv[0], "--allreduce-cta") == argv[0]) {
+            int n = strlen("--allreduce-cta");
+            const char * s = &argv[0][n];
+            if (*s == '=') { s++; }
+            else if (*s == '\0' && argc-*nargs > 1) { (*nargs)++; argv++; s=argv[0]; }
+            else { return EINVAL; }
+            char * endptr;
+            if (parse_int(&args->number_allreduce_cta, s, &endptr, NULL)) return EINVAL;
+            if (*endptr != '\0') return EINVAL;
+            (*nargs)++; argv++; continue;
+        }
+        if (strstr(argv[0], "--p2p-cta") == argv[0]) {
+            int n = strlen("--p2p-cta");
+            const char * s = &argv[0][n];
+            if (*s == '=') { s++; }
+            else if (*s == '\0' && argc-*nargs > 1) { (*nargs)++; argv++; s=argv[0]; }
+            else { return EINVAL; }
+            char * endptr;
+            if (parse_int(&args->number_p2p_cta, s, &endptr, NULL)) return EINVAL;
+            if (*endptr != '\0') return EINVAL;
+            (*nargs)++; argv++; continue;
+        }
+        if (strstr(argv[0], "--preconditioner") == argv[0]) {
+            int n = strlen("--preconditioner");
+            const char * s = &argv[0][n];
+            if (*s == '=') { s++; }
+            else if (*s == '\0' && argc-*nargs > 1) { (*nargs)++; argv++; s=argv[0]; }
+            else { return EINVAL; }
+            char * endptr;
+            if (parse_int(&args->preconditioner, s, &endptr, NULL)) return EINVAL;
+            if (*endptr != '\0') return EINVAL;
             (*nargs)++; argv++; continue;
         }
 
@@ -961,8 +1049,11 @@ int main(int argc, char *argv[])
     int maxits = args.maxits;
     int output_comm_matrix = args.output_comm_matrix;
     int use_rccl = args.commtype == acgcomm_rccl;
+    int use_rccl_split = args.commtype == acgcomm_rccl_split;
     int use_rocshmem = args.commtype == acgcomm_rocshmem;
-    int use_petsc = (args.solvertype == acgsolver_petsc || args.solvertype == acgsolver_petsc_pipelined);
+    int use_petsc = (args.solvertype == acgsolver_petsc || args.solvertype == acgsolver_petsc_pipelined ||
+        args.solvertype == acgsolver_petsc_preconditioned || args.solvertype == acgsolver_petsc_pipelined_preconditioned ||
+        args.solvertype == acgsolver_petsc_bicgstab || args.solvertype == acgsolver_petsc_pipelined_bicgstab);
 
     /* select a HIP device */
     int sharedrank = -1;
@@ -1067,7 +1158,9 @@ int main(int argc, char *argv[])
         fprintf(stderr, "RCCL version %d\n", ncclversion);
     }
     ncclComm_t ncclcomm;
-    if (use_rccl) {
+    ncclComm_t ncclcomm_allreduce;
+    ncclComm_t ncclcomm_p2p;
+    if (use_rccl || use_rccl_split) {
         ncclUniqueId nccluid;
         if (rank == root) ncclGetUniqueId(&nccluid);
         MPI_Bcast(&nccluid, sizeof(nccluid), MPI_BYTE, root, mpicomm);
@@ -1107,10 +1200,28 @@ int main(int argc, char *argv[])
             fprintf(stderr, "using aCG solver (pipelined)\n");
         } else if (args.solvertype == acgsolver_acg_device) {
             fprintf(stderr, "using aCG solver (device-side)\n");
+        } else if (args.solvertype == acgsolver_acg_preconditioned) {
+            fprintf(stderr, "using aCG solver (preconditioned)\n");
+        } else if (args.solvertype == acgsolver_acg_pipelined_preconditioned) {
+            fprintf(stderr, "using aCG solver (pipelined, preconditioned)\n");
+        } else if (args.solvertype == acgsolver_acg_preconditioned_bicgstab) {
+            fprintf(stderr, "using aCG solver (preconditioned BiCGStab)\n");
+        } else if (args.solvertype == acgsolver_acg_pipelined_bicgstab) {
+            fprintf(stderr, "using aCG solver (pipelined BiCGStab)\n");
+        } else if (args.solvertype == acgsolver_acg_pipelined_bicgstab_rr) {
+            fprintf(stderr, "using aCG solver (pipelined BiCGStab, residual replacement)\n");
         } else if (args.solvertype == acgsolver_petsc) {
             fprintf(stderr, "using PETSc solver\n");
         } else if (args.solvertype == acgsolver_petsc_pipelined) {
             fprintf(stderr, "using PETSc solver (pipelined)\n");
+        } else if (args.solvertype == acgsolver_petsc_preconditioned) {
+            fprintf(stderr, "using PETSc solver (preconditioned)\n");
+        } else if (args.solvertype == acgsolver_petsc_pipelined_preconditioned) {
+            fprintf(stderr, "using PETSc solver (pipelined, preconditioned)\n");
+        } else if (args.solvertype == acgsolver_petsc_bicgstab) {
+            fprintf(stderr, "using PETSc solver (BiCGStab)\n");
+        } else if (args.solvertype == acgsolver_petsc_pipelined_bicgstab) {
+            fprintf(stderr, "using PETSc solver (pipelined BiCGStab)\n");
         } else {
             fprintf(stderr, "invalid solver type\n");
             MPI_Finalize();
@@ -1126,6 +1237,31 @@ int main(int argc, char *argv[])
         if (rank == root) fprintf(stderr, "Using RCCL for communication\n");
         int rcclerrcode;
         err = acgcomm_init_rccl(&comm, ncclcomm, &rcclerrcode);
+        if (err) {
+            fprintf(stderr, "%s: %s\n", program_invocation_short_name, acgerrcodestr(err,rcclerrcode));
+            ncclCommDestroy(ncclcomm);
+            MPI_Finalize();
+            hipDeviceReset();
+            return EXIT_FAILURE;
+        }
+#else
+        if (rank == root) fprintf(stderr, "%s: %s\n", program_invocation_short_name, acgerrcodestr(ACG_ERR_RCCL_NOT_SUPPORTED,0));
+        MPI_Finalize();
+        hipDeviceReset();
+        return EXIT_FAILURE;
+#endif
+    } else if (use_rccl_split) {
+#if defined(ACG_HAVE_RCCL)
+        if (rank == root) {
+            fprintf(stderr, "Using RCCL(splitComm) for communication\n");
+            fprintf(stderr, "  # of CTAs for allreduce = %d\n", args.number_allreduce_cta);
+            fprintf(stderr, "  # of CTAs for P2P = %d\n", args.number_p2p_cta);
+        }
+        int rcclerrcode;
+        comm.number_allreduce_cta = args.number_allreduce_cta;
+        comm.number_p2p_cta = args.number_p2p_cta;
+        err = acgcomm_init_rccl_split(&comm, ncclcomm, ncclcomm_allreduce,
+                                      ncclcomm_p2p, &rcclerrcode);
         if (err) {
             fprintf(stderr, "%s: %s\n", program_invocation_short_name, acgerrcodestr(err,rcclerrcode));
             ncclCommDestroy(ncclcomm);
@@ -1177,7 +1313,7 @@ int main(int argc, char *argv[])
         if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-        if (use_rccl) ncclCommDestroy(ncclcomm);
+        if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
         MPI_Finalize();
         hipDeviceReset();
@@ -1194,7 +1330,7 @@ int main(int argc, char *argv[])
         if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-        if (use_rccl) ncclCommDestroy(ncclcomm);
+        if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
         MPI_Finalize();
         hipDeviceReset();
@@ -1223,7 +1359,7 @@ int main(int argc, char *argv[])
         if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-            if (use_rccl) ncclCommDestroy(ncclcomm);
+            if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
             MPI_Finalize();
             hipDeviceReset();
@@ -1244,7 +1380,7 @@ int main(int argc, char *argv[])
         if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-            if (use_rccl) ncclCommDestroy(ncclcomm);
+            if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
             MPI_Finalize();
             hipDeviceReset();
@@ -1288,7 +1424,7 @@ int main(int argc, char *argv[])
         if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-            if (use_rccl) ncclCommDestroy(ncclcomm);
+            if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
             MPI_Finalize();
             hipDeviceReset();
@@ -1309,7 +1445,7 @@ int main(int argc, char *argv[])
         if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-            if (use_rccl) ncclCommDestroy(ncclcomm);
+            if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
             MPI_Finalize();
             hipDeviceReset();
@@ -1329,13 +1465,23 @@ int main(int argc, char *argv[])
         if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-            if (use_rccl) ncclCommDestroy(ncclcomm);
+            if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
             MPI_Finalize();
             hipDeviceReset();
             return EXIT_FAILURE;
         }
-        if (mtxfile.symmetry != mtxsymmetric) {
+        /* The BiCGStab solvers accept a general (nonsymmetric) matrix,
+         * provided its sparsity pattern is symmetric; all other solvers
+         * still require a symmetric matrix. */
+        bool bicgstab_solver =
+            args.solvertype == acgsolver_acg_pipelined_bicgstab ||
+            args.solvertype == acgsolver_acg_pipelined_bicgstab_rr ||
+            args.solvertype == acgsolver_acg_preconditioned_bicgstab ||
+            args.solvertype == acgsolver_petsc_bicgstab ||
+            args.solvertype == acgsolver_petsc_pipelined_bicgstab;
+        if (mtxfile.symmetry != mtxsymmetric &&
+            !(bicgstab_solver && mtxfile.symmetry == mtxgeneral)) {
             fprintf(stderr, "%s: %s: expected symmetric; symmetry is %s\n",
                     program_invocation_short_name, Apath, mtxsymmetrystr(mtxfile.symmetry));
             errexit = true;
@@ -1349,7 +1495,7 @@ int main(int argc, char *argv[])
         if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-            if (use_rccl) ncclCommDestroy(ncclcomm);
+            if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
             MPI_Finalize();
             hipDeviceReset();
@@ -1369,7 +1515,7 @@ int main(int argc, char *argv[])
         if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-            if (use_rccl) ncclCommDestroy(ncclcomm);
+            if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
             MPI_Finalize();
             hipDeviceReset();
@@ -1410,8 +1556,39 @@ int main(int argc, char *argv[])
         const acgidx_t * rowidx = mtxfile.rowidx;
         const acgidx_t * colidx = mtxfile.colidx;
         const double * a = (const double *) mtxfile.data;
-        int err = acgsymcsrmatrix_init_real_double(
-            &Aroot, N, nnzs, idxbase, rowidx, colidx, a);
+        int err;
+        if (mtxfile.symmetry == mtxgeneral) {
+            /* Nonsymmetric values on a symmetric pattern: build the
+             * pattern from the upper-triangular entries (one per edge),
+             * then install the general values (filling the transpose
+             * values used to assemble the nonsymmetric operator). */
+            acgidx_t * urowidx = malloc((size_t)(nnzs > 0 ? nnzs : 1) * sizeof(*urowidx));
+            acgidx_t * ucolidx = malloc((size_t)(nnzs > 0 ? nnzs : 1) * sizeof(*ucolidx));
+            double * ua = malloc((size_t)(nnzs > 0 ? nnzs : 1) * sizeof(*ua));
+            if (!urowidx || !ucolidx || !ua) {
+                free(urowidx); free(ucolidx); free(ua);
+                err = ACG_ERR_ERRNO;
+            } else {
+                int64_t un = 0;
+                for (int64_t k = 0; k < nnzs; k++) {
+                    if (rowidx[k] <= colidx[k]) {
+                        urowidx[un] = rowidx[k];
+                        ucolidx[un] = colidx[k];
+                        ua[un] = a[k];
+                        un++;
+                    }
+                }
+                err = acgsymcsrmatrix_init_real_double(
+                    &Aroot, N, un, idxbase, urowidx, ucolidx, ua);
+                if (!err)
+                    err = acgsymcsrmatrix_set_general_values(
+                        &Aroot, nnzs, idxbase, rowidx, colidx, a);
+                free(urowidx); free(ucolidx); free(ua);
+            }
+        } else {
+            err = acgsymcsrmatrix_init_real_double(
+                &Aroot, N, nnzs, idxbase, rowidx, colidx, a);
+        }
         if (err) {
             fprintf(stderr, "%s: %s\n", program_invocation_short_name, acgerrcodestr(err, 0));
 #ifdef ACG_HAVE_PETSC
@@ -1423,7 +1600,7 @@ int main(int argc, char *argv[])
         if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-            if (use_rccl) ncclCommDestroy(ncclcomm);
+            if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
             MPI_Finalize();
             hipDeviceReset();
@@ -1477,7 +1654,7 @@ int main(int argc, char *argv[])
                 if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                if (use_rccl) ncclCommDestroy(ncclcomm);
+                if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                 MPI_Finalize();
                 hipDeviceReset();
@@ -1497,7 +1674,7 @@ int main(int argc, char *argv[])
                 if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                if (use_rccl) ncclCommDestroy(ncclcomm);
+                if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                 MPI_Finalize();
                 hipDeviceReset();
@@ -1546,7 +1723,7 @@ int main(int argc, char *argv[])
                 if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                if (use_rccl) ncclCommDestroy(ncclcomm);
+                if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                 MPI_Finalize();
                 hipDeviceReset();
@@ -1566,7 +1743,7 @@ int main(int argc, char *argv[])
                 if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                if (use_rccl) ncclCommDestroy(ncclcomm);
+                if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                 MPI_Finalize();
                 hipDeviceReset();
@@ -1585,7 +1762,7 @@ int main(int argc, char *argv[])
                 if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                if (use_rccl) ncclCommDestroy(ncclcomm);
+                if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                 MPI_Finalize();
                 hipDeviceReset();
@@ -1604,7 +1781,7 @@ int main(int argc, char *argv[])
                 if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                if (use_rccl) ncclCommDestroy(ncclcomm);
+                if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                 MPI_Finalize();
                 hipDeviceReset();
@@ -1623,7 +1800,7 @@ int main(int argc, char *argv[])
                 if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                if (use_rccl) ncclCommDestroy(ncclcomm);
+                if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                 MPI_Finalize();
                 hipDeviceReset();
@@ -1662,7 +1839,7 @@ int main(int argc, char *argv[])
                 if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                if (use_rccl) ncclCommDestroy(ncclcomm);
+                if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                 MPI_Finalize();
                 hipDeviceReset();
@@ -1762,7 +1939,7 @@ int main(int argc, char *argv[])
             if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-            if (use_rccl) ncclCommDestroy(ncclcomm);
+            if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
             MPI_Finalize();
             hipDeviceReset();
@@ -1814,7 +1991,7 @@ int main(int argc, char *argv[])
         if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                if (use_rccl) ncclCommDestroy(ncclcomm);
+                if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                 MPI_Finalize();
                 hipDeviceReset();
@@ -1833,7 +2010,7 @@ int main(int argc, char *argv[])
         if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                if (use_rccl) ncclCommDestroy(ncclcomm);
+                if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                 MPI_Finalize();
                 hipDeviceReset();
@@ -1851,7 +2028,7 @@ int main(int argc, char *argv[])
                 if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                if (use_rccl) ncclCommDestroy(ncclcomm);
+                if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                 MPI_Finalize();
                 hipDeviceReset();
@@ -1869,7 +2046,7 @@ int main(int argc, char *argv[])
                 if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                if (use_rccl) ncclCommDestroy(ncclcomm);
+                if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                 MPI_Finalize();
                 hipDeviceReset();
@@ -1887,7 +2064,7 @@ int main(int argc, char *argv[])
                 if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                if (use_rccl) ncclCommDestroy(ncclcomm);
+                if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                 MPI_Finalize();
                 hipDeviceReset();
@@ -1906,7 +2083,7 @@ int main(int argc, char *argv[])
                 if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                if (use_rccl) ncclCommDestroy(ncclcomm);
+                if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                 MPI_Finalize();
                 hipDeviceReset();
@@ -1930,7 +2107,7 @@ int main(int argc, char *argv[])
                 if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                if (use_rccl) ncclCommDestroy(ncclcomm);
+                if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                 MPI_Finalize();
                 hipDeviceReset();
@@ -1989,7 +2166,7 @@ int main(int argc, char *argv[])
                     if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                    if (use_rccl) ncclCommDestroy(ncclcomm);
+                    if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                     MPI_Finalize();
                     hipDeviceReset();
@@ -2008,7 +2185,7 @@ int main(int argc, char *argv[])
                     if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-                    if (use_rccl) ncclCommDestroy(ncclcomm);
+                    if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
                     MPI_Finalize();
                     hipDeviceReset();
@@ -2039,7 +2216,7 @@ int main(int argc, char *argv[])
             if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-            if (use_rccl) ncclCommDestroy(ncclcomm);
+            if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
             MPI_Finalize();
             hipDeviceReset();
@@ -2076,7 +2253,7 @@ int main(int argc, char *argv[])
             if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-            if (use_rccl) ncclCommDestroy(ncclcomm);
+            if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
             MPI_Finalize();
             hipDeviceReset();
@@ -2096,7 +2273,7 @@ int main(int argc, char *argv[])
             if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-            if (use_rccl) ncclCommDestroy(ncclcomm);
+            if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
             MPI_Finalize();
             hipDeviceReset();
@@ -2128,7 +2305,7 @@ int main(int argc, char *argv[])
         if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-        if (use_rccl) ncclCommDestroy(ncclcomm);
+        if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
         MPI_Finalize();
         hipDeviceReset();
@@ -2158,7 +2335,7 @@ int main(int argc, char *argv[])
         if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-        if (use_rccl) ncclCommDestroy(ncclcomm);
+        if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
         MPI_Finalize();
         hipDeviceReset();
@@ -2201,7 +2378,7 @@ int main(int argc, char *argv[])
             if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-            if (use_rccl) ncclCommDestroy(ncclcomm);
+            if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
             MPI_Finalize();
             hipDeviceReset();
@@ -2228,6 +2405,31 @@ int main(int argc, char *argv[])
                 &comm, tag, &mpierrcode, hipblas, hipsparse);
         } else if (args.solvertype == acgsolver_acg_pipelined) {
             err = acgsolverhip_solve_pipelined(
+                &cg, &A, &b, &x, maxits,
+                diffatol, diffrtol, residualatol, residualrtol, args.warmup,
+                &comm, tag, &mpierrcode, hipblas, hipsparse);
+        } else if (args.solvertype == acgsolver_acg_preconditioned) {
+            err = acgsolverhip_solve_preconditioned(
+                &cg, &A, &b, &x, maxits,
+                diffatol, diffrtol, residualatol, residualrtol, args.warmup,
+                &comm, tag, &mpierrcode, args.preconditioner, hipblas, hipsparse);
+        } else if (args.solvertype == acgsolver_acg_pipelined_preconditioned) {
+            err = acgsolverhip_solve_pipelined_preconditioned(
+                &cg, &A, &b, &x, maxits,
+                diffatol, diffrtol, residualatol, residualrtol, args.warmup,
+                &comm, tag, &mpierrcode, args.preconditioner, hipblas, hipsparse);
+        } else if (args.solvertype == acgsolver_acg_preconditioned_bicgstab) {
+            err = acgsolverhip_solve_preconditioned_bicgstab(
+                &cg, &A, &b, &x, maxits,
+                diffatol, diffrtol, residualatol, residualrtol, args.warmup,
+                &comm, tag, &mpierrcode, args.preconditioner, hipblas, hipsparse);
+        } else if (args.solvertype == acgsolver_acg_pipelined_bicgstab) {
+            err = acgsolverhip_solve_pipelined_bicgstab(
+                &cg, &A, &b, &x, maxits,
+                diffatol, diffrtol, residualatol, residualrtol, args.warmup,
+                &comm, tag, &mpierrcode, hipblas, hipsparse);
+        } else if (args.solvertype == acgsolver_acg_pipelined_bicgstab_rr) {
+            err = acgsolverhip_solve_pipelined_bicgstab_rr(
                 &cg, &A, &b, &x, maxits,
                 diffatol, diffrtol, residualatol, residualrtol, args.warmup,
                 &comm, tag, &mpierrcode, hipblas, hipsparse);
@@ -2261,7 +2463,7 @@ int main(int argc, char *argv[])
             if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-            if (use_rccl) ncclCommDestroy(ncclcomm);
+            if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
             MPI_Finalize();
             hipDeviceReset();
@@ -2275,12 +2477,21 @@ int main(int argc, char *argv[])
         }
 
         enum acgpetscksptype ksptype = PETSC_KSPCG;
-        if (args.solvertype == acgsolver_petsc_pipelined)
+        enum acgpetscpctype pctype = PETSC_PCNONE;
+        if (args.solvertype == acgsolver_petsc_pipelined ||
+            args.solvertype == acgsolver_petsc_pipelined_preconditioned)
             ksptype = PETSC_KSPPIPECG;
+        if (args.solvertype == acgsolver_petsc_bicgstab)
+            ksptype = PETSC_KSPBCGS;
+        if (args.solvertype == acgsolver_petsc_pipelined_bicgstab)
+            ksptype = PETSC_KSPPIPEBCGS;
+        if (args.solvertype == acgsolver_petsc_preconditioned ||
+            args.solvertype == acgsolver_petsc_pipelined_preconditioned)
+            pctype = PETSC_PCJACOBI;
 
         /* 7. prepare PETSc solver */
         struct acgsolverpetsc cg;
-        err = acgsolverpetsc_init(&cg, &A, ACG_DEVICE_HIP, ksptype, &comm);
+        err = acgsolverpetsc_init(&cg, &A, ACG_DEVICE_HIP, ksptype, pctype, &comm);
         if (err) {
             fprintf(stderr, "%s: %s\n", program_invocation_short_name, acgerrcodestr(err, 0));
 #ifdef ACG_HAVE_PETSC
@@ -2292,7 +2503,7 @@ int main(int argc, char *argv[])
         if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-            if (use_rccl) ncclCommDestroy(ncclcomm);
+            if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
             MPI_Finalize();
             hipDeviceReset();
@@ -2339,7 +2550,7 @@ int main(int argc, char *argv[])
         if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-            if (use_rccl) ncclCommDestroy(ncclcomm);
+            if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
             MPI_Finalize();
             hipDeviceReset();
@@ -2415,7 +2626,7 @@ int main(int argc, char *argv[])
     if (use_rocshmem) acg_rocshmem_finalize();
 #endif
 #ifdef ACG_HAVE_RCCL
-    if (use_rccl) ncclCommDestroy(ncclcomm);
+    if (use_rccl || use_rccl_split) ncclCommDestroy(ncclcomm);
 #endif
     MPI_Finalize();
     hipDeviceReset();

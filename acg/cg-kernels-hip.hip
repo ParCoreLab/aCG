@@ -191,6 +191,707 @@ int acgsolverhip_daxpy_minus_alpha(
     return ACG_SUCCESS;
 }
 
+
+// Kernel to compute Jacobi preconditioner (inverse of diagonal)
+__global__ void acgsolverhip_jacobi_preconditioner_kernel(
+    int n,
+    const double *diag,
+    double *M_inv)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+    {
+        M_inv[i] = (fabs(diag[i]) > 1e-14) ? 1.0 / diag[i] : 1.0;
+    }
+}
+
+int acgsolverhip_jacobi_preconditioner(
+    int n,
+    const double *d_diag,
+    double *d_M_inv,
+    hipStream_t stream)
+{
+    static int mingridsize = 0, blocksize = 0;
+    if (mingridsize == 0 && blocksize == 0)
+    {
+        hipOccupancyMaxPotentialBlockSize(
+            &mingridsize, &blocksize, acgsolverhip_jacobi_preconditioner_kernel, 0,
+            0);
+    }
+    acgsolverhip_jacobi_preconditioner_kernel<<<mingridsize, blocksize, 0, stream>>>(
+        n, d_diag, d_M_inv);
+    if (hipPeekAtLastError())
+        return ACG_ERR_HIP;
+    return ACG_SUCCESS;
+}
+
+// Kernel to apply Jacobi preconditioner (element-wise multiplication)
+__global__ void acgsolverhip_apply_jacobi_preconditioner_kernel(
+    int num,
+    const double *M_inv,
+    const double *r,
+    double *z)
+{
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < num;
+         i += blockDim.x * gridDim.x)
+    {
+        z[i] = M_inv[i] * r[i];
+    }
+}
+
+int acgsolverhip_apply_jacobi_preconditioner(
+    int n,
+    const double *M_inv,
+    const double *d_r,
+    double *d_z,
+    hipStream_t stream)
+{
+    static int mingridsize = 0, blocksize = 0, sharedmemsize = 0;
+    if (mingridsize == 0 && blocksize == 0)
+    {
+        hipOccupancyMaxPotentialBlockSize(
+            &mingridsize, &blocksize, acgsolverhip_apply_jacobi_preconditioner_kernel, 0,
+            0);
+    }
+    // /* launch device-side CG kernel */
+    // void *kernelargs[] = {
+    //     (void *)&n, (void *)&M_inv, (void *)&d_r, (void *)&d_z};
+    // dim3 blockDim(blocksize, 1, 1);
+    // dim3 gridDim(mingridsize, 1, 1);
+    // cudaLaunchCooperativeKernel(
+    //     (void *)acgsolverhip_apply_jacobi_preconditioner_kernel, gridDim, blockDim,
+    //     kernelargs, sharedmemsize, stream);
+    
+    acgsolverhip_apply_jacobi_preconditioner_kernel<<<mingridsize, blocksize, 0, stream>>>
+        (n, M_inv, d_r, d_z);
+    if (hipPeekAtLastError())
+        return ACG_ERR_HIP;
+    return ACG_SUCCESS;
+}
+
+// Extract diagonal from CSR matrix
+__global__ void acgsolverhip_jacobi_extract_diagonal_kernel(
+    int n,
+    const int *csrRowPtr,
+    const int *csrColInd,
+    const double *csrVal,
+    double *diag)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n)
+    {
+        diag[i] = 1.0; // Default value if diagonal not found
+        for (int j = csrRowPtr[i]; j < csrRowPtr[i + 1]; j++)
+        {
+            if (csrColInd[j] == i)
+            {
+                diag[i] = csrVal[j];
+                break;
+            }
+        }
+    }
+}
+
+int acgsolverhip_jacobi_extract_diagonal(
+    int n,
+    const int *d_rowptr,
+    const int *d_colidx,
+    const double *d_a,
+    double *d_diag,
+    hipStream_t stream)
+{
+    static int mingridsize = 0, blocksize = 0;
+    if (mingridsize == 0 && blocksize == 0)
+    {
+        hipOccupancyMaxPotentialBlockSize(
+            &mingridsize, &blocksize, acgsolverhip_jacobi_extract_diagonal_kernel, 0,
+            0);
+    }
+    acgsolverhip_jacobi_extract_diagonal_kernel<<<mingridsize, blocksize, 0, stream>>>(
+        n, d_rowptr, d_colidx, d_a, d_diag);
+    if (hipPeekAtLastError())
+        return ACG_ERR_HIP;
+    return ACG_SUCCESS;
+}
+
+
+__global__ void acgsolverhip_preconditioned_pipelined_daxpy_fused_kernel(
+    int num,
+    int k,
+    const double *gamma,
+    double *gamma_prev,
+    const double *delta,
+    double *p,
+    double *r,
+    double *t,
+    double *x,
+    double *z,
+    double *w,
+    double *q,
+    double *n,
+    double *m,
+    double *u,
+    double *alpha_prev)
+{
+    double beta;
+    double alpha;
+    if (k > 0)
+    {
+        beta = (*gamma) / (*gamma_prev);
+        alpha = (*gamma) / ((*delta) - (beta * (*gamma) / (*alpha_prev)));
+    }
+    else
+    {
+        beta = 0;
+        alpha = (*gamma) / (*delta);
+    }
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < num;
+         i += blockDim.x * gridDim.x)
+    {
+        z[i] = n[i] + beta * z[i];
+        q[i] = m[i] + beta * q[i];
+        t[i] = w[i] + beta * t[i];
+        p[i] = u[i] + beta * p[i];
+
+        x[i] += alpha * p[i];
+        r[i] -= alpha * t[i];
+        u[i] -= alpha * q[i];
+        w[i] -= alpha * z[i];
+    }
+
+    // cg::grid_group grid = cg::this_grid();
+    // cg::sync(grid);
+    // if (grid.thread_rank() == 0)
+    // {
+    //     *gamma_prev = *gamma;
+    //     *alpha_prev = alpha;
+    // }
+}
+
+int acgsolverhip_preconditioned_pipelined_daxpy_fused(
+    int num,
+    int k,
+    const double *d_gamma,
+    double *d_gamma_prev,
+    const double *d_delta,
+    double *d_p,
+    double *d_r,
+    double *d_t,
+    double *d_x,
+    double *d_z,
+    double *d_w,
+    double *d_q,
+    double *d_n,
+    double *d_m,
+    double *d_u,
+    double *d_alpha_prev,
+    hipStream_t stream)
+{
+    static int mingridsize = 0, blocksize = 0, sharedmemsize = 0;
+    if (mingridsize == 0 && blocksize == 0)
+    {
+        hipOccupancyMaxPotentialBlockSize(
+            &mingridsize, &blocksize,
+            acgsolverhip_preconditioned_pipelined_daxpy_fused_kernel, 0, 0);
+    }
+    acgsolverhip_preconditioned_pipelined_daxpy_fused_kernel<<<mingridsize,blocksize, 0, stream>>>(
+        num, k, d_gamma, d_gamma_prev, d_delta, d_p, d_r,
+        d_t, d_x, d_z, d_w, d_q, d_n, d_m, d_u, d_alpha_prev);
+    if (hipPeekAtLastError())
+        return ACG_ERR_HIP;
+
+    /* launch device-side CG kernel */
+    // void *kernelargs[] = {
+    //     (void *)&num, (void *)&k, (void *)&d_gamma, (void *)&d_gamma_prev,
+    //     (void *)&d_delta, (void *)&d_p, (void *)&d_r,
+    //     (void *)&d_t, (void *)&d_x, (void *)&d_z,
+    //     (void *)&d_w, (void *)&d_q, (void *)&d_n,
+    //     (void *)&d_m, (void *)&d_u, (void *)&d_alpha_prev};
+    // dim3 blockDim(blocksize, 1, 1);
+    // dim3 gridDim(mingridsize, 1, 1);
+    // cudaLaunchCooperativeKernel(
+    //     (void *)acgsolvercuda_preconditioned_pipelined_daxpy_fused_kernel, gridDim, blockDim,
+    //     kernelargs, sharedmemsize, stream);
+
+    return ACG_SUCCESS;
+}
+
+__global__ void acgsolverhip_preconditioned_daxpy_fused_kernel(
+    int num,
+    const double *gamma,
+    double *gamma_prev,
+    const double *delta,
+    double *p,
+    double *r,
+    double *t,
+    double *x)
+{
+    double alpha;
+    alpha = (*gamma) / (*delta);
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < num;
+         i += blockDim.x * gridDim.x)
+    {
+        x[i] += alpha * p[i];
+        r[i] -= alpha * t[i];
+    }
+
+    // grid-sync scalar update (see CUDA original) is handled by the
+    // separate reset kernel launched below, mirroring
+    // acgsolverhip_pipelined_daxpy_fused.
+}
+
+__global__ void acgsolverhip_preconditioned_daxpy_fused_reset_scalars(
+    const double *gamma,
+    double *gamma_prev)
+{
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+    {
+        *gamma_prev = *gamma;
+    }
+}
+
+int acgsolverhip_preconditioned_daxpy_fused(
+    int num,
+    const double *d_gamma,
+    double *d_gamma_prev,
+    const double *d_delta,
+    double *d_p,
+    double *d_r,
+    double *d_t,
+    double *d_x,
+    hipStream_t stream)
+{
+    static int mingridsize = 0, blocksize = 0;
+    if (mingridsize == 0 && blocksize == 0)
+    {
+        hipOccupancyMaxPotentialBlockSize(
+            &mingridsize, &blocksize,
+            acgsolverhip_preconditioned_daxpy_fused_kernel, 0, 0);
+    }
+    acgsolverhip_preconditioned_daxpy_fused_kernel<<<mingridsize, blocksize, 0, stream>>>(
+        num, d_gamma, d_gamma_prev, d_delta, d_p, d_r, d_t, d_x);
+    if (hipPeekAtLastError())
+        return ACG_ERR_HIP;
+    acgsolverhip_preconditioned_daxpy_fused_reset_scalars<<<1, 1, 0, stream>>>(
+        d_gamma, d_gamma_prev);
+    if (hipPeekAtLastError())
+        return ACG_ERR_HIP;
+    return ACG_SUCCESS;
+}
+
+/*
+ * Preconditioned BiCGStab vector updates.
+ *
+ * These kernels carry out the per-iteration vector updates of the
+ * preconditioned stabilised bi-conjugate gradient method. The relevant
+ * scalars (beta, alpha, omega) are computed on the device from the
+ * dot-product results, so the host never needs to synchronise mid-iteration.
+ */
+
+/* p <- r + beta(p - omega*v), with beta = (rho/rho_prev)*(alpha/omega) (beta = 0 when k == 0). */
+__global__ void acgsolverhip_bicgstab_p_update_kernel(
+    int n,
+    int k,
+    const double *rho,
+    const double *rho_prev,
+    const double *alpha,
+    const double *omega,
+    double *p,
+    const double *r,
+    const double *v)
+{
+    double beta = 0.0;
+    if (k > 0)
+        beta = ((*rho) / (*rho_prev)) * ((*alpha) / (*omega));
+    double w = *omega;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += blockDim.x * gridDim.x)
+    {
+        p[i] = r[i] + beta * (p[i] - w * v[i]);
+    }
+}
+
+int acgsolverhip_bicgstab_p_update(
+    int n,
+    int k,
+    const double *d_rho,
+    const double *d_rho_prev,
+    const double *d_alpha,
+    const double *d_omega,
+    double *d_p,
+    const double *d_r,
+    const double *d_v,
+    hipStream_t stream)
+{
+    static int mingridsize = 0, blocksize = 0;
+    if (mingridsize == 0 && blocksize == 0)
+    {
+        hipOccupancyMaxPotentialBlockSize(
+            &mingridsize, &blocksize, acgsolverhip_bicgstab_p_update_kernel, 0, 0);
+    }
+    acgsolverhip_bicgstab_p_update_kernel<<<mingridsize, blocksize, 0, stream>>>(
+        n, k, d_rho, d_rho_prev, d_alpha, d_omega, d_p, d_r, d_v);
+    if (hipPeekAtLastError())
+        return ACG_ERR_HIP;
+    return ACG_SUCCESS;
+}
+
+/* alpha <- rho/(rhat,v) (stored to *alpha) and s <- r - alpha*v. */
+__global__ void acgsolverhip_bicgstab_s_update_kernel(
+    int n,
+    double *alpha,
+    const double *rho,
+    const double *rhat_v,
+    double *s,
+    const double *r,
+    const double *v)
+{
+    double a = (*rho) / (*rhat_v);
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+        *alpha = a;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += blockDim.x * gridDim.x)
+    {
+        s[i] = r[i] - a * v[i];
+    }
+}
+
+int acgsolverhip_bicgstab_s_update(
+    int n,
+    double *d_alpha,
+    const double *d_rho,
+    const double *d_rhat_v,
+    double *d_s,
+    const double *d_r,
+    const double *d_v,
+    hipStream_t stream)
+{
+    static int mingridsize = 0, blocksize = 0;
+    if (mingridsize == 0 && blocksize == 0)
+    {
+        hipOccupancyMaxPotentialBlockSize(
+            &mingridsize, &blocksize, acgsolverhip_bicgstab_s_update_kernel, 0, 0);
+    }
+    acgsolverhip_bicgstab_s_update_kernel<<<mingridsize, blocksize, 0, stream>>>(
+        n, d_alpha, d_rho, d_rhat_v, d_s, d_r, d_v);
+    if (hipPeekAtLastError())
+        return ACG_ERR_HIP;
+    return ACG_SUCCESS;
+}
+
+/*
+ * omega <- (t,s)/(t,t) (stored to *omega), then
+ *   x <- x + alpha*y + omega*z,  r <- s - omega*t,
+ * and rho_prev <- rho for the next iteration.
+ */
+__global__ void acgsolverhip_bicgstab_xr_update_kernel(
+    int n,
+    double *omega,
+    double *rho_prev,
+    const double *num,
+    const double *den,
+    const double *rho,
+    const double *alpha,
+    double *x,
+    const double *y,
+    const double *z,
+    double *r,
+    const double *s,
+    const double *t)
+{
+    double w = (*num) / (*den);
+    double a = *alpha;
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+    {
+        *omega = w;
+        *rho_prev = *rho;
+    }
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += blockDim.x * gridDim.x)
+    {
+        x[i] += a * y[i] + w * z[i];
+        r[i] = s[i] - w * t[i];
+    }
+}
+
+int acgsolverhip_bicgstab_xr_update(
+    int n,
+    double *d_omega,
+    double *d_rho_prev,
+    const double *d_num,
+    const double *d_den,
+    const double *d_rho,
+    const double *d_alpha,
+    double *d_x,
+    const double *d_y,
+    const double *d_z,
+    double *d_r,
+    const double *d_s,
+    const double *d_t,
+    hipStream_t stream)
+{
+    static int mingridsize = 0, blocksize = 0;
+    if (mingridsize == 0 && blocksize == 0)
+    {
+        hipOccupancyMaxPotentialBlockSize(
+            &mingridsize, &blocksize, acgsolverhip_bicgstab_xr_update_kernel, 0, 0);
+    }
+    acgsolverhip_bicgstab_xr_update_kernel<<<mingridsize, blocksize, 0, stream>>>(
+        n, d_omega, d_rho_prev, d_num, d_den, d_rho, d_alpha,
+        d_x, d_y, d_z, d_r, d_s, d_t);
+    if (hipPeekAtLastError())
+        return ACG_ERR_HIP;
+    return ACG_SUCCESS;
+}
+
+/* x <- x + alpha*y, used for the half-step (||s||) convergence exit. */
+__global__ void acgsolverhip_bicgstab_x_halfstep_kernel(
+    int n,
+    const double *alpha,
+    double *x,
+    const double *y)
+{
+    double a = *alpha;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += blockDim.x * gridDim.x)
+    {
+        x[i] += a * y[i];
+    }
+}
+
+int acgsolverhip_bicgstab_x_halfstep(
+    int n,
+    const double *d_alpha,
+    double *d_x,
+    const double *d_y,
+    hipStream_t stream)
+{
+    static int mingridsize = 0, blocksize = 0;
+    if (mingridsize == 0 && blocksize == 0)
+    {
+        hipOccupancyMaxPotentialBlockSize(
+            &mingridsize, &blocksize, acgsolverhip_bicgstab_x_halfstep_kernel, 0, 0);
+    }
+    acgsolverhip_bicgstab_x_halfstep_kernel<<<mingridsize, blocksize, 0, stream>>>(
+        n, d_alpha, d_x, d_y);
+    if (hipPeekAtLastError())
+        return ACG_ERR_HIP;
+    return ACG_SUCCESS;
+}
+
+/*
+ * Pipelined (communication-hiding) BiCGStab vector updates.
+ *
+ * These kernels implement the rearranged recurrences of the pipelined
+ * BiCGStab method (Cools & Vanroose, 2017). All scalars (beta, omega, alpha)
+ * live on the device, computed from the dot-product results.
+ */
+
+/*
+ * Steps 1-3:   p <- r + beta(p - omega*s)
+ *              s <- w + beta(s - omega*z)
+ *              z <- t + beta(z - omega*v)
+ */
+__global__ void acgsolverhip_pipelined_bicgstab_psz_update_kernel(
+    int n,
+    const double *beta,
+    const double *omega,
+    const double *r,
+    const double *w,
+    const double *t,
+    double *p,
+    double *s,
+    double *z,
+    const double *v)
+{
+    double b = *beta, om = *omega;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += blockDim.x * gridDim.x)
+    {
+        double pi = p[i], si = s[i], zi = z[i], vi = v[i];
+        p[i] = r[i] + b * (pi - om * si);
+        s[i] = w[i] + b * (si - om * zi);
+        z[i] = t[i] + b * (zi - om * vi);
+    }
+}
+
+int acgsolverhip_pipelined_bicgstab_psz_update(
+    int n,
+    const double *d_beta,
+    const double *d_omega,
+    const double *d_r,
+    const double *d_w,
+    const double *d_t,
+    double *d_p,
+    double *d_s,
+    double *d_z,
+    const double *d_v,
+    hipStream_t stream)
+{
+    static int mingridsize = 0, blocksize = 0;
+    if (mingridsize == 0 && blocksize == 0)
+    {
+        hipOccupancyMaxPotentialBlockSize(
+            &mingridsize, &blocksize, acgsolverhip_pipelined_bicgstab_psz_update_kernel, 0, 0);
+    }
+    acgsolverhip_pipelined_bicgstab_psz_update_kernel<<<mingridsize, blocksize, 0, stream>>>(
+        n, d_beta, d_omega, d_r, d_w, d_t, d_p, d_s, d_z, d_v);
+    if (hipPeekAtLastError())
+        return ACG_ERR_HIP;
+    return ACG_SUCCESS;
+}
+
+/* Steps 4-5:  q <- r - alpha*s,   y <- w - alpha*z. */
+__global__ void acgsolverhip_pipelined_bicgstab_qy_update_kernel(
+    int n,
+    const double *alpha,
+    const double *r,
+    const double *w,
+    const double *s,
+    const double *z,
+    double *q,
+    double *y)
+{
+    double a = *alpha;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += blockDim.x * gridDim.x)
+    {
+        q[i] = r[i] - a * s[i];
+        y[i] = w[i] - a * z[i];
+    }
+}
+
+int acgsolverhip_pipelined_bicgstab_qy_update(
+    int n,
+    const double *d_alpha,
+    const double *d_r,
+    const double *d_w,
+    const double *d_s,
+    const double *d_z,
+    double *d_q,
+    double *d_y,
+    hipStream_t stream)
+{
+    static int mingridsize = 0, blocksize = 0;
+    if (mingridsize == 0 && blocksize == 0)
+    {
+        hipOccupancyMaxPotentialBlockSize(
+            &mingridsize, &blocksize, acgsolverhip_pipelined_bicgstab_qy_update_kernel, 0, 0);
+    }
+    acgsolverhip_pipelined_bicgstab_qy_update_kernel<<<mingridsize, blocksize, 0, stream>>>(
+        n, d_alpha, d_r, d_w, d_s, d_z, d_q, d_y);
+    if (hipPeekAtLastError())
+        return ACG_ERR_HIP;
+    return ACG_SUCCESS;
+}
+
+/*
+ * omega <- (q,y)/(y,y) (stored to *omega), then
+ *   x <- x + alpha*p + omega*q,   r <- q - omega*y,   w <- y - omega*(t - alpha*v).
+ */
+__global__ void acgsolverhip_pipelined_bicgstab_xrw_update_kernel(
+    int n,
+    double *omega,
+    const double *g1,
+    const double *g2,
+    const double *alpha,
+    const double *p,
+    const double *q,
+    const double *y,
+    const double *t,
+    const double *v,
+    double *x,
+    double *r,
+    double *w)
+{
+    double om = (*g1) / (*g2);
+    double a = *alpha;
+    if (blockIdx.x == 0 && threadIdx.x == 0)
+        *omega = om;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += blockDim.x * gridDim.x)
+    {
+        double qi = q[i], yi = y[i], ti = t[i], vi = v[i];
+        x[i] += a * p[i] + om * qi;
+        r[i] = qi - om * yi;
+        w[i] = yi - om * (ti - a * vi);
+    }
+}
+
+int acgsolverhip_pipelined_bicgstab_xrw_update(
+    int n,
+    double *d_omega,
+    const double *d_g1,
+    const double *d_g2,
+    const double *d_alpha,
+    const double *d_p,
+    const double *d_q,
+    const double *d_y,
+    const double *d_t,
+    const double *d_v,
+    double *d_x,
+    double *d_r,
+    double *d_w,
+    hipStream_t stream)
+{
+    static int mingridsize = 0, blocksize = 0;
+    if (mingridsize == 0 && blocksize == 0)
+    {
+        hipOccupancyMaxPotentialBlockSize(
+            &mingridsize, &blocksize, acgsolverhip_pipelined_bicgstab_xrw_update_kernel, 0, 0);
+    }
+    acgsolverhip_pipelined_bicgstab_xrw_update_kernel<<<mingridsize, blocksize, 0, stream>>>(
+        n, d_omega, d_g1, d_g2, d_alpha, d_p, d_q, d_y, d_t, d_v, d_x, d_r, d_w);
+    if (hipPeekAtLastError())
+        return ACG_ERR_HIP;
+    return ACG_SUCCESS;
+}
+
+/*
+ * Steps 14-15 (single thread): given the second-reduction results
+ *   d1 = (rhat0,r),  d2 = (rhat0,w),  d3 = (rhat0,s),  d4 = (rhat0,z),
+ * the previous rho = (rhat0,r_old) in *rho, and alpha, omega, compute
+ *   beta <- (alpha/omega)*d1/rho,   alpha <- d1/(d2 + beta*d3 - beta*omega*d4),   rho <- d1.
+ */
+__global__ void acgsolverhip_pipelined_bicgstab_scalars_kernel(
+    double *beta,
+    double *alpha,
+    double *rho,
+    const double *omega,
+    const double *d1,
+    const double *d2,
+    const double *d3,
+    const double *d4)
+{
+    if (threadIdx.x == 0 && blockIdx.x == 0)
+    {
+        double a = *alpha, om = *omega, rho_old = *rho;
+        double D1 = *d1, D2 = *d2, D3 = *d3, D4 = *d4;
+        double b = (a / om) * (D1 / rho_old);
+        *beta = b;
+        *alpha = D1 / (D2 + b * D3 - b * om * D4);
+        *rho = D1;
+    }
+}
+
+int acgsolverhip_pipelined_bicgstab_scalars(
+    double *d_beta,
+    double *d_alpha,
+    double *d_rho,
+    const double *d_omega,
+    const double *d_d1,
+    const double *d_d2,
+    const double *d_d3,
+    const double *d_d4,
+    hipStream_t stream)
+{
+    acgsolverhip_pipelined_bicgstab_scalars_kernel<<<1, 1, 0, stream>>>(
+        d_beta, d_alpha, d_rho, d_omega, d_d1, d_d2, d_d3, d_d4);
+    if (hipPeekAtLastError())
+        return ACG_ERR_HIP;
+    return ACG_SUCCESS;
+}
+
 __launch_bounds__(256)
 __global__ void acgsolverhip_pipelined_daxpy_fused_kernel(
     int n,
@@ -1150,9 +1851,10 @@ int acgsolverhip_csrgemv_merge_startrows(
     acgidx_t n,
     const acgidx_t * __restrict d_rowptr,
     acgidx_t nstartrows,
-    acgidx_t * d_startrows)
+    acgidx_t * d_startrows,
+    hipStream_t stream)
 {
-    csrgemv_merge_startrows<<<110,512>>>(n, d_rowptr, nstartrows, d_startrows);
+    csrgemv_merge_startrows<<<110,512,0,stream>>>(n, d_rowptr, nstartrows, d_startrows);
     if (hipPeekAtLastError()) return ACG_ERR_HIP;
     return ACG_SUCCESS;
 }
@@ -1165,12 +1867,56 @@ int acgsolverhip_csrgemv_merge(
     const acgidx_t * __restrict d_colidx,
     const double * __restrict d_a,
     double alpha,
+    double beta,
     acgidx_t nstartrows,
-    const acgidx_t * __restrict d_startrows)
+    const acgidx_t * __restrict d_startrows,
+    hipStream_t stream)
 {
-    csrgemv_merge_global<<<110,512>>>(
+    /* zero the output vector first when beta is 0 (the merge kernel only
+     * accumulates into y); beta == 1 preserves the existing contents. */
+    if (beta == 0.0)
+    {
+        hipError_t err = hipMemsetAsync(d_y, 0, n*sizeof(double), stream);
+        if (err) return ACG_ERR_HIP;
+    }
+    csrgemv_merge_global<<<110,512,0,stream>>>(
         n, d_y, d_x, d_rowptr, d_colidx, d_a, alpha, nstartrows, d_startrows);
     if (hipPeekAtLastError()) return ACG_ERR_HIP;
+    return ACG_SUCCESS;
+}
+
+/*
+ * 'acgsolverhip_dcopy()' copies a device vector: y[i] = x[i].
+ * (Distinct from the file-local __device__ 'dcopy' helper below, which is
+ * an inline device function used by the monolithic solvers.)
+ */
+__global__ void acgsolverhip_dcopy_kernel(
+    acgidx_t n,
+    double * __restrict y,
+    const double * __restrict x)
+{
+    for (acgidx_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += blockDim.x * gridDim.x)
+    {
+        y[i] = x[i];
+    }
+}
+
+int acgsolverhip_dcopy(
+    acgidx_t n,
+    double *d_y,
+    const double *d_x,
+    hipStream_t stream)
+{
+    static int mingridsize = 0, blocksize = 0;
+    if (mingridsize == 0 && blocksize == 0)
+    {
+        hipOccupancyMaxPotentialBlockSize(
+            &mingridsize, &blocksize, acgsolverhip_dcopy_kernel, 0, 0);
+    }
+    acgsolverhip_dcopy_kernel<<<mingridsize, blocksize, 0, stream>>>(n, d_y, d_x);
+    if (hipPeekAtLastError())
+        return ACG_ERR_HIP;
     return ACG_SUCCESS;
 }
 

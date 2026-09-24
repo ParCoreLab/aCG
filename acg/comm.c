@@ -51,21 +51,56 @@
 #include <string.h>
 
 /* default communicators */
-struct acgcomm ACG_COMM_NULL = { acgcomm_null };
+struct acgcomm ACG_COMM_NULL = {acgcomm_null};
 #ifdef ACG_HAVE_MPI
-struct acgcomm ACG_COMM_WORLD = { acgcomm_mpi, MPI_COMM_WORLD };
+struct acgcomm ACG_COMM_WORLD = {acgcomm_mpi, MPI_COMM_WORLD};
 #endif
 
 /**
  * ‘acgcommtypestr()’ returns a string for a communicator type.
  */
-const char * acgcommtypestr(enum acgcommtype commtype)
+const char *acgcommtypestr(enum acgcommtype commtype)
 {
-    if (commtype == acgcomm_null) { return "null"; }
-    else if (commtype == acgcomm_mpi) { return "mpi"; }
-    else if (commtype == acgcomm_nccl) { return "nccl"; }
-    else if (commtype == acgcomm_nvshmem) { return "nvshmem"; }
-    else { return "unknown"; }
+    if (commtype == acgcomm_null)
+    {
+        return "null";
+    }
+    else if (commtype == acgcomm_mpi)
+    {
+        return "mpi";
+    }
+    else if (commtype == acgcomm_nccl)
+    {
+        return "nccl";
+    }
+    else if (commtype == acgcomm_nccl_split)
+    {
+        return "nccl_split";
+    }
+    else if (commtype == acgcomm_rccl)
+    {
+        return "rccl";
+    }
+    else if (commtype == acgcomm_rccl_split)
+    {
+        return "rccl_split";
+    }
+    else if (commtype == acgcomm_nvshmem)
+    {
+        return "nvshmem";
+    }
+    else if (commtype == acgcomm_nvshmem_split)
+    {
+        return "nvshmem_split";
+    }
+    else if (commtype == acgcomm_rocshmem)
+    {
+        return "rocshmem";
+    }
+    else
+    {
+        return "unknown";
+    }
 }
 
 #if defined(ACG_HAVE_MPI)
@@ -74,12 +109,17 @@ const char * acgcommtypestr(enum acgcommtype commtype)
  * communicator.
  */
 int acgcomm_init_mpi(
-    struct acgcomm * comm,
+    struct acgcomm *comm,
     MPI_Comm mpicomm,
-    int * mpierrcode)
+    int *mpierrcode)
 {
     int err = MPI_Comm_dup(mpicomm, &comm->mpicomm);
-    if (err) { if (mpierrcode) *mpierrcode = err; return ACG_ERR_MPI; }
+    if (err)
+    {
+        if (mpierrcode)
+            *mpierrcode = err;
+        return ACG_ERR_MPI;
+    }
     comm->type = acgcomm_mpi;
     return ACG_SUCCESS;
 }
@@ -91,9 +131,9 @@ int acgcomm_init_mpi(
  * communicator.
  */
 int acgcomm_init_nccl(
-    struct acgcomm * comm,
+    struct acgcomm *comm,
     ncclComm_t ncclcomm,
-    int * ncclerrcode)
+    int *ncclerrcode)
 {
     /*
      * disable the call to ncclCommSplit for now due to occasional
@@ -107,6 +147,92 @@ int acgcomm_init_nccl(
     comm->type = acgcomm_nccl;
     return ACG_SUCCESS;
 }
+
+/**
+ * ‘acgcomm_init_nccl_split()’ creates a communicator from a given main NCCL
+ * communicator.
+ */
+int acgcomm_init_nccl_split(
+    struct acgcomm *comm,
+    ncclComm_t ncclcomm,
+    ncclComm_t ncclcomm_allreduce,
+    ncclComm_t ncclcomm_p2p,
+    int *ncclerrcode)
+{
+    /*
+     * disable the call to ncclCommSplit for now due to occasional
+     * failures in large-scale testing. As a result, the caller must
+     * not free 'ncclcomm' until after calling acgcomm_free.
+     */
+
+    /* ncclResult_t err = ncclCommSplit(ncclcomm, 0, 0, &comm->ncclcomm, NULL); */
+    /* if (err != ncclSuccess) { if (ncclerrcode) *ncclerrcode = err; return ACG_ERR_NCCL; } */
+    comm->ncclcomm = ncclcomm;
+    comm->type = acgcomm_nccl_split;
+    comm->ncclcomm_allreduce = ncclcomm_allreduce;
+    comm->ncclcomm_p2p = ncclcomm_p2p;
+
+    int rank;
+    int rankerr = acgcomm_rank(comm, &rank);
+    if (rankerr)
+        return rankerr;
+
+#if NCCL_VERSION_CODE >= 21605
+    fprintf(stderr, "acgcomm_init_nccl_split: using ncclCommSplit with config\n");
+
+    ncclConfig_t configAllreduce = NCCL_CONFIG_INITIALIZER;
+    configAllreduce.maxCTAs = 2;
+    // configAllreduce.blocking = 0;
+    configAllreduce.collnetEnable = 1;
+    configAllreduce.splitShare = 0;
+
+    ncclResult_t err = ncclCommSplit(comm->ncclcomm, 0, rank, &comm->ncclcomm_allreduce, &configAllreduce);
+    if (err != ncclSuccess)
+    {
+        if (ncclerrcode)
+            *ncclerrcode = err;
+        return ACG_ERR_NCCL;
+    }
+
+    ncclConfig_t configP2P = NCCL_CONFIG_INITIALIZER;
+    configP2P.maxCTAs = 4;
+    // configP2P.blocking = 0;
+    configP2P.collnetEnable = 1;
+    configP2P.splitShare = 0;
+
+    err = ncclCommSplit(comm->ncclcomm, 1, rank, &comm->ncclcomm_p2p, &configP2P);
+    if (err != ncclSuccess)
+    {
+        ncclCommDestroy(comm->ncclcomm_allreduce);
+        if (ncclerrcode)
+            *ncclerrcode = err;
+        return ACG_ERR_NCCL;
+    }
+
+#else
+    fprintf(stderr, "acgcomm_init_nccl_split: using ncclCommSplit with w/o config\n");
+
+    ncclResult_t err = ncclCommSplit(comm->ncclcomm, 0, rank, &comm->ncclcomm_allreduce, NULL);
+    if (err != ncclSuccess)
+    {
+        if (ncclerrcode)
+            *ncclerrcode = err;
+        return ACG_ERR_NCCL;
+    }
+
+    err = ncclCommSplit(comm->ncclcomm, 1, rank, &comm->ncclcomm_p2p, NULL);
+    if (err != ncclSuccess)
+    {
+        ncclCommDestroy(comm->ncclcomm_allreduce);
+        if (ncclerrcode)
+            *ncclerrcode = err;
+        return ACG_ERR_NCCL;
+    }
+#endif
+
+    return ACG_SUCCESS;
+}
+
 #endif
 
 #if defined(ACG_HAVE_RCCL)
@@ -115,14 +241,73 @@ int acgcomm_init_nccl(
  * communicator.
  */
 int acgcomm_init_rccl(
-    struct acgcomm * comm,
+    struct acgcomm *comm,
     ncclComm_t ncclcomm,
-    int * rcclerrcode)
+    int *rcclerrcode)
 {
     /* int err = ncclCommSplit(ncclcomm, 0, 0, &comm->ncclcomm, NULL); */
     /* if (err != ncclSuccess) { if (rcclerrcode) *rcclerrcode = err; return ACG_ERR_RCCL; } */
     comm->ncclcomm = ncclcomm;
     comm->type = acgcomm_rccl;
+    return ACG_SUCCESS;
+}
+
+/**
+ * 'acgcomm_init_rccl_split()' creates a split communicator from a given
+ * main RCCL communicator.
+ */
+int acgcomm_init_rccl_split(
+    struct acgcomm *comm,
+    ncclComm_t ncclcomm,
+    ncclComm_t ncclcomm_allreduce,
+    ncclComm_t ncclcomm_p2p,
+    int *rcclerrcode)
+{
+    comm->ncclcomm = ncclcomm;
+    comm->type = acgcomm_rccl_split;
+    comm->ncclcomm_allreduce = ncclcomm_allreduce;
+    comm->ncclcomm_p2p = ncclcomm_p2p;
+
+    int rank;
+    int rankerr = acgcomm_rank(comm, &rank);
+    if (rankerr)
+        return rankerr;
+
+    fprintf(stderr, "acgcomm_init_rccl_split: using ncclCommSplit\n");
+
+    ncclResult_t err;
+
+    ncclConfig_t configAllreduce = NCCL_CONFIG_INITIALIZER;
+    if (comm->number_allreduce_cta > 0)
+    {
+        configAllreduce.maxCTAs = comm->number_allreduce_cta;
+        configAllreduce.minCTAs = comm->number_allreduce_cta;
+    }
+
+    err = ncclCommSplit(comm->ncclcomm, 0, rank, &comm->ncclcomm_allreduce, &configAllreduce);
+    if (err != ncclSuccess)
+    {
+        if (rcclerrcode)
+            *rcclerrcode = err;
+        return ACG_ERR_RCCL;
+    }
+
+    ncclConfig_t configP2P = NCCL_CONFIG_INITIALIZER;
+    if (comm->number_p2p_cta > 0)
+    {
+        configP2P.maxCTAs = comm->number_p2p_cta;
+        configP2P.minCTAs = comm->number_p2p_cta;
+    }
+
+    err = ncclCommSplit(comm->ncclcomm, 1, rank, &comm->ncclcomm_p2p, &configP2P);
+    if (err != ncclSuccess)
+    {
+        ncclCommDestroy(comm->ncclcomm_allreduce);
+        if (rcclerrcode)
+            *rcclerrcode = err;
+        return ACG_ERR_RCCL;
+    }
+
     return ACG_SUCCESS;
 }
 #endif
@@ -131,19 +316,31 @@ int acgcomm_init_rccl(
  * ‘acgcomm_free()’ frees resources associated with a communicator.
  */
 void acgcomm_free(
-    struct acgcomm * comm)
+    struct acgcomm *comm)
 {
 #if defined(ACG_HAVE_MPI)
-    if (comm->type == acgcomm_mpi) MPI_Comm_free(&comm->mpicomm);
+    if (comm->type == acgcomm_mpi)
+        MPI_Comm_free(&comm->mpicomm);
 #endif
 #if defined(ACG_HAVE_NCCL)
     /* if (comm->type == acgcomm_nccl) ncclCommDestroy(comm->ncclcomm); */
+    if (comm->type == acgcomm_nccl_split)
+    {
+        ncclCommDestroy(comm->ncclcomm_allreduce);
+        ncclCommDestroy(comm->ncclcomm_p2p);
+    }
 #endif
 #if defined(ACG_HAVE_RCCL)
     /* if (comm->type == acgcomm_rccl) ncclCommDestroy(comm->ncclcomm); */
+    if (comm->type == acgcomm_rccl_split)
+    {
+        ncclCommDestroy(comm->ncclcomm_allreduce);
+        ncclCommDestroy(comm->ncclcomm_p2p);
+    }
 #endif
 #if defined(ACG_HAVE_NVSHMEM)
-    if (comm->type == acgcomm_nvshmem) acgcomm_free_nvshmem(comm);
+    if (comm->type == acgcomm_nvshmem || comm->type == acgcomm_nvshmem_split)
+        acgcomm_free_nvshmem(comm);
 #endif
 }
 
@@ -151,33 +348,41 @@ void acgcomm_free(
  * ‘acgcomm_size()’ size of a communicator (i.e., number of processes).
  */
 int acgcomm_size(
-    const struct acgcomm * comm,
-    int * commsize)
+    const struct acgcomm *comm,
+    int *commsize)
 {
-    if (comm->type == acgcomm_null) return 1;
+    if (comm->type == acgcomm_null)
+        return 1;
 #if defined(ACG_HAVE_MPI)
-    else if (comm->type == acgcomm_mpi) {
+    else if (comm->type == acgcomm_mpi)
+    {
         int err = MPI_Comm_size(comm->mpicomm, commsize);
-        if (err) return ACG_ERR_MPI;
+        if (err)
+            return ACG_ERR_MPI;
         return ACG_SUCCESS;
     }
 #endif
 #if defined(ACG_HAVE_NCCL)
-    else if (comm->type == acgcomm_nccl) {
+    else if (comm->type == acgcomm_nccl || comm->type == acgcomm_nccl_split)
+    {
         int err = ncclCommCount(comm->ncclcomm, commsize);
-        if (err != ncclSuccess) return ACG_ERR_NCCL;
+        if (err != ncclSuccess)
+            return ACG_ERR_NCCL;
         return ACG_SUCCESS;
     }
 #endif
 #if defined(ACG_HAVE_RCCL)
-    else if (comm->type == acgcomm_rccl) {
+    else if (comm->type == acgcomm_rccl || comm->type == acgcomm_rccl_split)
+    {
         int err = ncclCommCount(comm->ncclcomm, commsize);
-        if (err != ncclSuccess) return ACG_ERR_RCCL;
+        if (err != ncclSuccess)
+            return ACG_ERR_RCCL;
         return ACG_SUCCESS;
     }
 #endif
 #if defined(ACG_HAVE_NVSHMEM)
-    else if (comm->type == acgcomm_nvshmem) {
+    else if (comm->type == acgcomm_nvshmem || comm->type == acgcomm_nvshmem_split)
+    {
         return acgcomm_size_nvshmem(comm, commsize);
     }
 #endif
@@ -185,36 +390,44 @@ int acgcomm_size(
 }
 
 /**
- * ‘acgcomm_rank()’ rank of the current process in a communicator.
+ * 'acgcomm_rank()' rank of the current process in a communicator.
  */
 int acgcomm_rank(
-    const struct acgcomm * comm,
-    int * rank)
+    const struct acgcomm *comm,
+    int *rank)
 {
-    if (comm->type == acgcomm_null) return 0;
+    if (comm->type == acgcomm_null)
+        return 0;
 #if defined(ACG_HAVE_MPI)
-    else if (comm->type == acgcomm_mpi) {
+    else if (comm->type == acgcomm_mpi)
+    {
         int err = MPI_Comm_rank(comm->mpicomm, rank);
-        if (err) return ACG_ERR_MPI;
+        if (err)
+            return ACG_ERR_MPI;
         return ACG_SUCCESS;
     }
 #endif
 #if defined(ACG_HAVE_NCCL)
-    else if (comm->type == acgcomm_nccl) {
+    else if (comm->type == acgcomm_nccl || comm->type == acgcomm_nccl_split)
+    {
         int err = ncclCommUserRank(comm->ncclcomm, rank);
-        if (err != ncclSuccess) return ACG_ERR_NCCL;
+        if (err != ncclSuccess)
+            return ACG_ERR_NCCL;
         return ACG_SUCCESS;
     }
 #endif
 #if defined(ACG_HAVE_RCCL)
-    else if (comm->type == acgcomm_rccl) {
+    else if (comm->type == acgcomm_rccl || comm->type == acgcomm_rccl_split)
+    {
         int err = ncclCommUserRank(comm->ncclcomm, rank);
-        if (err != ncclSuccess) return ACG_ERR_RCCL;
+        if (err != ncclSuccess)
+            return ACG_ERR_RCCL;
         return ACG_SUCCESS;
     }
 #endif
 #if defined(ACG_HAVE_NVSHMEM)
-    else if (comm->type == acgcomm_nvshmem) {
+    else if (comm->type == acgcomm_nvshmem || comm->type == acgcomm_nvshmem_split)
+    {
         return acgcomm_rank_nvshmem(comm, rank);
     }
 #endif
@@ -228,19 +441,27 @@ int acgcomm_rank(
 /**
  * ‘acgdatatypestr()’ returns a string for a data type.
  */
-const char * acgdatatypestr(enum acgdatatype datatype)
+const char *acgdatatypestr(enum acgdatatype datatype)
 {
-    if (datatype == ACG_DOUBLE) { return "double"; }
-    else { return "unknown"; }
+    if (datatype == ACG_DOUBLE)
+    {
+        return "double";
+    }
+    else
+    {
+        return "unknown";
+    }
 }
 
 /**
  * ‘acgdatatype_size()’ returns the size (in bytes) of a data type.
  */
-int acgdatatype_size(enum acgdatatype datatype, int * size)
+int acgdatatype_size(enum acgdatatype datatype, int *size)
 {
-    if (datatype == ACG_DOUBLE) *size = sizeof(double);
-    else return ACG_ERR_INVALID_VALUE;
+    if (datatype == ACG_DOUBLE)
+        *size = sizeof(double);
+    else
+        return ACG_ERR_INVALID_VALUE;
     return ACG_SUCCESS;
 }
 
@@ -251,7 +472,8 @@ int acgdatatype_size(enum acgdatatype datatype, int * size)
  */
 MPI_Datatype acgdatatype_mpi(enum acgdatatype datatype)
 {
-    if (datatype == ACG_DOUBLE) return MPI_DOUBLE;
+    if (datatype == ACG_DOUBLE)
+        return MPI_DOUBLE;
     return MPI_DATATYPE_NULL;
 }
 #endif
@@ -263,7 +485,8 @@ MPI_Datatype acgdatatype_mpi(enum acgdatatype datatype)
  */
 ncclDataType_t acgdatatype_nccl(enum acgdatatype datatype)
 {
-    if (datatype == ACG_DOUBLE) return ncclDouble;
+    if (datatype == ACG_DOUBLE)
+        return ncclDouble;
     return -1;
 }
 #endif
@@ -275,10 +498,16 @@ ncclDataType_t acgdatatype_nccl(enum acgdatatype datatype)
 /**
  * ‘acgopstr()’ returns a string for an operation.
  */
-const char * acgopstr(enum acgop op)
+const char *acgopstr(enum acgop op)
 {
-    if (op == ACG_SUM) { return "sum"; }
-    else { return "unknown"; }
+    if (op == ACG_SUM)
+    {
+        return "sum";
+    }
+    else
+    {
+        return "unknown";
+    }
 }
 
 #if defined(ACG_HAVE_MPI)
@@ -287,7 +516,8 @@ const char * acgopstr(enum acgop op)
  */
 MPI_Op acgop_mpi(enum acgop op)
 {
-    if (op == ACG_SUM) return MPI_SUM;
+    if (op == ACG_SUM)
+        return MPI_SUM;
     return MPI_OP_NULL;
 }
 #endif
@@ -298,7 +528,8 @@ MPI_Op acgop_mpi(enum acgop op)
  */
 ncclRedOp_t acgop_nccl(enum acgop op)
 {
-    if (op == ACG_SUM) return ncclSum;
+    if (op == ACG_SUM)
+        return ncclSum;
     return -1;
 }
 #endif
@@ -307,39 +538,91 @@ ncclRedOp_t acgop_nccl(enum acgop op)
  * collective communication
  */
 
+/**
+ * ‘acgcomm_wait()’ waits for a non-blocking communication request to
+ * complete.
+ */
+int acgcomm_wait(
+    const struct acgcomm *comm,
+    int *errcode,
+    MPI_Request *req)
+{
+    int err;
+    if (comm->type == acgcomm_null)
+    {
+        return ACG_SUCCESS;
+    }
+    else if (comm->type == acgcomm_mpi)
+    {
+#if defined(ACG_HAVE_MPI)
+        err = MPI_Wait(req, MPI_STATUS_IGNORE);
+        if (err)
+        {
+            if (errcode)
+                *errcode = err;
+            return ACG_ERR_MPI;
+        }
+        return ACG_SUCCESS;
+#else
+        return ACG_ERR_MPI_NOT_SUPPORTED;
+#endif
+    }
+    return ACG_SUCCESS;
+}
+
 #ifdef ACG_HAVE_CUDA
 /**
  * ‘acgcomm_barrier()’ performs barrier synchronisation.
  */
 int acgcomm_barrier(
     cudaStream_t stream,
-    const struct acgcomm * comm,
-    int * errcode)
+    const struct acgcomm *comm,
+    int *errcode)
 {
     int err;
-    if (comm->type == acgcomm_null) return ACG_SUCCESS;
-    else if (comm->type == acgcomm_mpi) {
+    if (comm->type == acgcomm_null)
+        return ACG_SUCCESS;
+    else if (comm->type == acgcomm_mpi)
+    {
 #if defined(ACG_HAVE_MPI)
         cudaStreamSynchronize(stream);
         err = MPI_Barrier(comm->mpicomm);
-        if (err) { if (errcode) *errcode = err; return ACG_ERR_MPI; }
+        if (err)
+        {
+            if (errcode)
+                *errcode = err;
+            return ACG_ERR_MPI;
+        }
 #else
         return ACG_ERR_MPI_NOT_SUPPORTED;
 #endif
-    } else if (comm->type == acgcomm_nccl) {
+    }
+    else if (comm->type == acgcomm_nccl || comm->type == acgcomm_nccl_split)
+    {
 #if defined(ACG_HAVE_NCCL)
         err = ncclAllReduce(NULL, NULL, 0, ncclInt, ncclSum, comm->ncclcomm, stream);
-        if (err != ncclSuccess) { if (errcode) *errcode = err; return ACG_ERR_NCCL; }
+        if (err != ncclSuccess)
+        {
+            if (errcode)
+                *errcode = err;
+            return ACG_ERR_NCCL;
+        }
 #else
         return ACG_ERR_NCCL_NOT_SUPPORTED;
 #endif
-    } else if (comm->type == acgcomm_nvshmem) {
+    }
+    else if (comm->type == acgcomm_nvshmem || comm->type == acgcomm_nvshmem_split)
+    {
 #if defined(ACG_HAVE_NVSHMEM)
         acg_nvshmemx_barrier_all_on_stream(stream);
 #else
         return ACG_ERR_NVSHMEM_NOT_SUPPORTED;
 #endif
-    } else { return ACG_ERR_INVALID_VALUE; }
+    }
+    else
+    {
+        return ACG_ERR_INVALID_VALUE;
+    }
     return ACG_SUCCESS;
 }
 
@@ -348,48 +631,115 @@ int acgcomm_barrier(
  * precision floating point value.
  */
 int acgcomm_allreduce(
-    const void * src,
-    void * dst,
+    const void *src,
+    void *dst,
     int count,
     enum acgdatatype datatype,
     enum acgop op,
     cudaStream_t stream,
-    const struct acgcomm * comm,
-    int * errcode)
+    const struct acgcomm *comm,
+    int *errcode)
 {
     int err;
-    if (comm->type == acgcomm_null) return ACG_SUCCESS;
-    else if (comm->type == acgcomm_mpi) {
+    if (comm->type == acgcomm_null)
+        return ACG_SUCCESS;
+    else if (comm->type == acgcomm_mpi)
+    {
 #if defined(ACG_HAVE_MPI)
         cudaStreamSynchronize(stream);
         err = MPI_Allreduce(
             src, dst, count, acgdatatype_mpi(datatype), acgop_mpi(op), comm->mpicomm);
-        if (err) { if (errcode) *errcode = err; return ACG_ERR_MPI; }
+        //        err = MPI_Iallreduce(src, dst, count, acgdatatype_mpi(datatype), acgop_mpi(op), comm->mpicomm, req);
+        if (err)
+        {
+            if (errcode)
+                *errcode = err;
+            return ACG_ERR_MPI;
+        }
 #else
         return ACG_ERR_MPI_NOT_SUPPORTED;
 #endif
-    } else if (comm->type == acgcomm_nccl) {
+    }
+    else if (comm->type == acgcomm_nccl)
+    {
 #if defined(ACG_HAVE_NCCL)
         err = ncclAllReduce(
             src == ACG_IN_PLACE ? dst : src, dst,
             count, acgdatatype_nccl(datatype), acgop_nccl(op),
             comm->ncclcomm, stream);
-        if (err != ncclSuccess) { if (errcode) *errcode = err; return ACG_ERR_NCCL; }
+        if (err != ncclSuccess)
+        {
+            if (errcode)
+                *errcode = err;
+            return ACG_ERR_NCCL;
+        }
 #else
         return ACG_ERR_NCCL_NOT_SUPPORTED;
 #endif
-    } else if (comm->type == acgcomm_nvshmem) {
+    }
+    else if (comm->type == acgcomm_nccl_split)
+    {
+#if defined(ACG_HAVE_NCCL)
+        err = ncclAllReduce(
+            src == ACG_IN_PLACE ? dst : src, dst,
+            count, acgdatatype_nccl(datatype), acgop_nccl(op),
+            comm->ncclcomm_allreduce, stream);
+        if (err != ncclSuccess)
+        {
+            if (errcode)
+                *errcode = err;
+            return ACG_ERR_NCCL;
+        }
+#else
+        return ACG_ERR_NCCL_NOT_SUPPORTED;
+#endif
+    }
+    else if (comm->type == acgcomm_nvshmem)
+    {
 #if defined(ACG_HAVE_NVSHMEM)
-        if (op == ACG_SUM) {
+        if (op == ACG_SUM)
+        {
             err = acg_nvshmemx_double_sum_reduce_on_stream(
                 ACG_NVSHMEM_TEAM_WORLD, dst, src == ACG_IN_PLACE ? dst : src,
                 count, stream);
-            if (err) { if (errcode) *errcode = err; return ACG_ERR_NVSHMEM; }
-        } else return ACG_ERR_INVALID_VALUE;
+            if (err)
+            {
+                if (errcode)
+                    *errcode = err;
+                return ACG_ERR_NVSHMEM;
+            }
+        }
+        else
+            return ACG_ERR_INVALID_VALUE;
 #else
         return ACG_ERR_NVSHMEM_NOT_SUPPORTED;
 #endif
-    } else { return ACG_ERR_INVALID_VALUE; }
+    }
+    else if (comm->type == acgcomm_nvshmem_split)
+    {
+#if defined(ACG_HAVE_NVSHMEM)
+        if (op == ACG_SUM)
+        {
+            err = acg_nvshmemx_double_sum_reduce_on_stream(
+                comm->nvshmem_team_allreduce, dst, src == ACG_IN_PLACE ? dst : src,
+                count, stream);
+            if (err)
+            {
+                if (errcode)
+                    *errcode = err;
+                return ACG_ERR_NVSHMEM;
+            }
+        }
+        else
+            return ACG_ERR_INVALID_VALUE;
+#else
+        return ACG_ERR_NVSHMEM_NOT_SUPPORTED;
+#endif
+    }
+    else
+    {
+        return ACG_ERR_INVALID_VALUE;
+    }
     return ACG_SUCCESS;
 }
 #endif
@@ -400,33 +750,53 @@ int acgcomm_allreduce(
  */
 int acgcomm_barrier_hip(
     hipStream_t stream,
-    const struct acgcomm * comm,
-    int * errcode)
+    const struct acgcomm *comm,
+    int *errcode)
 {
     int err;
-    if (comm->type == acgcomm_null) return ACG_SUCCESS;
-    else if (comm->type == acgcomm_mpi) {
+    if (comm->type == acgcomm_null)
+        return ACG_SUCCESS;
+    else if (comm->type == acgcomm_mpi)
+    {
 #if defined(ACG_HAVE_MPI)
         hipStreamSynchronize(stream);
         err = MPI_Barrier(comm->mpicomm);
-        if (err) { if (errcode) *errcode = err; return ACG_ERR_MPI; }
+        if (err)
+        {
+            if (errcode)
+                *errcode = err;
+            return ACG_ERR_MPI;
+        }
 #else
         return ACG_ERR_MPI_NOT_SUPPORTED;
 #endif
-    } else if (comm->type == acgcomm_rccl) {
+    }
+    else if (comm->type == acgcomm_rccl || comm->type == acgcomm_rccl_split)
+    {
 #if defined(ACG_HAVE_RCCL)
         err = ncclAllReduce(NULL, NULL, 0, ncclInt, ncclSum, comm->ncclcomm, stream);
-        if (err != ncclSuccess) { if (errcode) *errcode = err; return ACG_ERR_RCCL; }
+        if (err != ncclSuccess)
+        {
+            if (errcode)
+                *errcode = err;
+            return ACG_ERR_RCCL;
+        }
 #else
         return ACG_ERR_RCCL_NOT_SUPPORTED;
 #endif
-    } else if (comm->type == acgcomm_rocshmem) {
+    }
+    else if (comm->type == acgcomm_rocshmem)
+    {
 #if defined(ACG_HAVE_ROCSHMEM)
         acg_rocshmemx_barrier_all_on_stream(stream);
 #else
         return ACG_ERR_ROCSHMEM_NOT_SUPPORTED;
 #endif
-    } else { return ACG_ERR_INVALID_VALUE; }
+    }
+    else
+    {
+        return ACG_ERR_INVALID_VALUE;
+    }
     return ACG_SUCCESS;
 }
 
@@ -435,48 +805,93 @@ int acgcomm_barrier_hip(
  * precision floating point value.
  */
 int acgcomm_allreduce_hip(
-    const void * src,
-    void * dst,
+    const void *src,
+    void *dst,
     int count,
     enum acgdatatype datatype,
     enum acgop op,
     hipStream_t stream,
-    const struct acgcomm * comm,
-    int * errcode)
+    const struct acgcomm *comm,
+    int *errcode)
 {
     int err;
-    if (comm->type == acgcomm_null) return ACG_SUCCESS;
-    else if (comm->type == acgcomm_mpi) {
+    if (comm->type == acgcomm_null)
+        return ACG_SUCCESS;
+    else if (comm->type == acgcomm_mpi)
+    {
 #if defined(ACG_HAVE_MPI)
         hipStreamSynchronize(stream);
         err = MPI_Allreduce(
             src, dst, count, acgdatatype_mpi(datatype), acgop_mpi(op), comm->mpicomm);
-        if (err) { if (errcode) *errcode = err; return ACG_ERR_MPI; }
+        if (err)
+        {
+            if (errcode)
+                *errcode = err;
+            return ACG_ERR_MPI;
+        }
 #else
         return ACG_ERR_MPI_NOT_SUPPORTED;
 #endif
-    } else if (comm->type == acgcomm_rccl) {
+    }
+    else if (comm->type == acgcomm_rccl)
+    {
 #if defined(ACG_HAVE_RCCL)
         err = ncclAllReduce(
             src == ACG_IN_PLACE ? dst : src, dst,
             count, acgdatatype_nccl(datatype), acgop_nccl(op),
             comm->ncclcomm, stream);
-        if (err != ncclSuccess) { if (errcode) *errcode = err; return ACG_ERR_RCCL; }
+        if (err != ncclSuccess)
+        {
+            if (errcode)
+                *errcode = err;
+            return ACG_ERR_RCCL;
+        }
 #else
         return ACG_ERR_RCCL_NOT_SUPPORTED;
 #endif
-    } else if (comm->type == acgcomm_rocshmem) {
+    }
+    else if (comm->type == acgcomm_rccl_split)
+    {
+#if defined(ACG_HAVE_RCCL)
+        err = ncclAllReduce(
+            src == ACG_IN_PLACE ? dst : src, dst,
+            count, acgdatatype_nccl(datatype), acgop_nccl(op),
+            comm->ncclcomm_allreduce, stream);
+        if (err != ncclSuccess)
+        {
+            if (errcode)
+                *errcode = err;
+            return ACG_ERR_RCCL;
+        }
+#else
+        return ACG_ERR_RCCL_NOT_SUPPORTED;
+#endif
+    }
+    else if (comm->type == acgcomm_rocshmem)
+    {
 #if defined(ACG_HAVE_ROCSHMEM)
-        if (op == ACG_SUM) {
+        if (op == ACG_SUM)
+        {
             err = acg_rocshmemx_double_sum_reduce_on_stream(
                 ACG_ROCSHMEM_TEAM_WORLD, dst, src == ACG_IN_PLACE ? dst : src,
                 count, stream);
-            if (err) { if (errcode) *errcode = err; return ACG_ERR_ROCSHMEM; }
-        } else return ACG_ERR_INVALID_VALUE;
+            if (err)
+            {
+                if (errcode)
+                    *errcode = err;
+                return ACG_ERR_ROCSHMEM;
+            }
+        }
+        else
+            return ACG_ERR_INVALID_VALUE;
 #else
         return ACG_ERR_ROCSHMEM_NOT_SUPPORTED;
 #endif
-    } else { return ACG_ERR_INVALID_VALUE; }
+    }
+    else
+    {
+        return ACG_ERR_INVALID_VALUE;
+    }
     return ACG_SUCCESS;
 }
 #endif

@@ -289,6 +289,21 @@ struct acgsymcsrmatrix
      * matrix values of the matrix in full storage format.
      */
     double * fa, * oa;
+
+    /**
+     * ‘aT’ is an optional array of length ‘npnzs’ that holds the
+     * transpose value of each stored (undirected) edge: if the packed
+     * entry ‘k’ represents the matrix position (i,j) (i.e. ‘a[k]’ =
+     * a(i,j)), then ‘aT[k]’ = a(j,i).
+     *
+     * It is only used for nonsymmetric matrices that have a symmetric
+     * sparsity pattern but nonsymmetric values. For genuinely symmetric
+     * matrices ‘aT’ is ‘NULL’, and all existing code paths behave
+     * exactly as before. When ‘aT’ is non-NULL, the full-storage builder
+     * uses ‘aT[k]’ (rather than ‘a[k]’) for the mirrored lower/upper
+     * entry, so that the assembled operator A is nonsymmetric.
+     */
+    double * aT;
 };
 
 /**
@@ -319,6 +334,34 @@ ACG_API int acgsymcsrmatrix_init_rowwise_real_double(
     acgidx_t N,
     int idxbase,
     const int64_t * rowptr,
+    const acgidx_t * colidx,
+    const double * a);
+
+/**
+ * ‘acgsymcsrmatrix_set_general_values()’ turns an already-initialised
+ * matrix (built from the symmetric sparsity pattern) into a nonsymmetric
+ * matrix with the same pattern but with the supplied general values.
+ *
+ * The matrix ‘A’ must have been initialised with the (symmetric) pattern,
+ * for example by passing the upper-triangular entries to
+ * ‘acgsymcsrmatrix_init_real_double()’. The arguments ‘rowidx’, ‘colidx’
+ * and ‘a’ then provide the full set of nonzeros (both triangles) of the
+ * general matrix. This routine overwrites the packed values ‘A->a’ and
+ * allocates and fills ‘A->aT’ with the transpose values, so that the
+ * full-storage operator subsequently assembled is nonsymmetric.
+ *
+ * It must be called on the global (unpartitioned) matrix, before
+ * partitioning/distribution; the partitioning and distribution routines
+ * carry ‘aT’ along automatically.
+ *
+ * This routine assumes a symmetric sparsity pattern (a_ij != 0 <=>
+ * a_ji != 0). A one-sided entry receives an implicit zero transpose.
+ */
+ACG_API int acgsymcsrmatrix_set_general_values(
+    struct acgsymcsrmatrix * A,
+    int64_t nnzs,
+    int idxbase,
+    const acgidx_t * rowidx,
     const acgidx_t * colidx,
     const double * a);
 

@@ -39,60 +39,70 @@
 #endif
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
 #if defined(ACG_HAVE_CUDA) && defined(ACG_HAVE_NVSHMEM)
-/*
- * library constants
- */
+    /*
+     * library constants
+     */
 
-/* ... */
+    /* ... */
 
-/*
- * library handles
- */
+    /*
+     * library handles
+     */
 
-typedef int32_t acg_nvshmem_team_t;
-enum {
-    ACG_NVSHMEM_TEAM_INVALID = -1,
-    ACG_NVSHMEM_TEAM_WORLD = 0,
-    ACG_NVSHMEM_TEAM_SHARED = 1,
-    ACG_NVSHMEMX_TEAM_NODE = 2,
-};
+    typedef int32_t acg_nvshmem_team_t;
+    enum
+    {
+        ACG_NVSHMEM_TEAM_INVALID = -1,
+        ACG_NVSHMEM_TEAM_WORLD = 0,
+        ACG_NVSHMEM_TEAM_SHARED = 1,
+        ACG_NVSHMEMX_TEAM_NODE = 2,
+        ACG_NVSHMEM_TEAM_ALLREDUCE = 3,
+    };
 
-/*
- * library setup, exit, and query
- */
+    /*
+     * library setup, exit, and query
+     */
 
-void acg_nvshmem_init(void);
-/* int acg_nvshmemx_init_attr(unsigned int flags, nvshmemx_init_attr_t *attributes); */
-int acg_nvshmem_my_pe(void);
-int acg_nvshmem_n_pes(void);
-void acg_nvshmem_finalize(void);
-void acg_nvshmem_info_get_version(int *major, int *minor);
-void acg_nvshmem_info_get_name(char *name);
-void acg_nvshmemx_vendor_get_version_info(int *major, int *minor, int *patch);
+    void acg_nvshmem_init(void);
+    /* int acg_nvshmemx_init_attr(unsigned int flags, nvshmemx_init_attr_t *attributes); */
+    int acg_nvshmem_my_pe(void);
+    int acg_nvshmem_n_pes(void);
+    void acg_nvshmem_finalize(void);
+    void acg_nvshmem_info_get_version(int *major, int *minor);
+    void acg_nvshmem_info_get_name(char *name);
+    void acg_nvshmemx_vendor_get_version_info(int *major, int *minor, int *patch);
 
-/*
- * memory management
- */
+    /*
+     * memory management
+     */
 
-void *acg_nvshmem_malloc(size_t size);
-void acg_nvshmem_free(void *ptr);
-void *acg_nvshmem_align(size_t alignment, size_t size);
-void *acg_nvshmem_calloc(size_t count, size_t size);
+    void *acg_nvshmem_malloc(size_t size);
+    void acg_nvshmem_free(void *ptr);
+    void *acg_nvshmem_align(size_t alignment, size_t size);
+    void *acg_nvshmem_calloc(size_t count, size_t size);
 
-/*
- * implicit team collectives
- */
+    /*
+     * implicit team collectives
+     */
 
-void acg_nvshmem_barrier_all(void);
-void acg_nvshmemx_barrier_all_on_stream(cudaStream_t stream);
-void acg_nvshmem_sync_all(void);
-void acg_nvshmemx_sync_all_on_stream(cudaStream_t stream);
-int acg_nvshmem_double_sum_reduce(acg_nvshmem_team_t team, double *dest, const double *source, size_t nreduce);
-int acg_nvshmemx_double_sum_reduce_on_stream(acg_nvshmem_team_t team, double *dest, const double *source, size_t nreduce, cudaStream_t stream);
+    void acg_nvshmem_barrier_all(void);
+    void acg_nvshmemx_barrier_all_on_stream(cudaStream_t stream);
+    void acg_nvshmem_sync_all(void);
+    void acg_nvshmemx_sync_all_on_stream(cudaStream_t stream);
+    int acg_nvshmem_double_sum_reduce(acg_nvshmem_team_t team, double *dest, const double *source, size_t nreduce);
+    int acg_nvshmemx_double_sum_reduce_on_stream(acg_nvshmem_team_t team, double *dest, const double *source, size_t nreduce, cudaStream_t stream);
+
+    /*
+     * team management
+     */
+
+    int acg_nvshmem_team_split_strided(acg_nvshmem_team_t parent, int start, int stride, int size, int num_contexts, acg_nvshmem_team_t *new_team);
+    int acg_nvshmem_team_destroy(acg_nvshmem_team_t team);
 #endif
 
 #ifdef __cplusplus

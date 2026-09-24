@@ -68,6 +68,14 @@ enum acgpetscksptype
 {
     PETSC_KSPCG,
     PETSC_KSPPIPECG,
+    PETSC_KSPBCGS,
+    PETSC_KSPPIPEBCGS,
+};
+
+enum acgpetscpctype
+{
+    PETSC_PCNONE,
+    PETSC_PCJACOBI,
 };
 
 /**
@@ -82,6 +90,7 @@ struct acgsolverpetsc
     /* PETSc data structures */
     struct acgpetsc * petsc;
     enum acgpetscksptype ksptype;
+    enum acgpetscpctype pctype;
 
     /* stopping criterion */
     int maxits;
@@ -133,6 +142,7 @@ ACG_API int acgsolverpetsc_init(
     const struct acgsymcsrmatrix * A,
     enum acgdevicetype acgdevicetype,
     enum acgpetscksptype ksptype,
+    enum acgpetscpctype pctype,
     const struct acgcomm * comm);
 
 /*

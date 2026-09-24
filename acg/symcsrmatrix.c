@@ -134,6 +134,7 @@ int acgsymcsrmatrix_init_real_double(
         A->frowptr = A->orowptr = NULL;
         A->fcolidx = A->ocolidx = NULL;
         A->fa = A->oa = NULL;
+        A->aT = NULL;
 
     } else {
         acgidx_t * rcolidx = malloc((size_t)nnzs*sizeof(*rcolidx));
@@ -212,6 +213,47 @@ int acgsymcsrmatrix_init_rowwise_real_double(
     A->frowptr = A->orowptr = NULL;
     A->fcolidx = A->ocolidx = NULL;
     A->fa = A->oa = NULL;
+    A->aT = NULL;
+    return ACG_SUCCESS;
+}
+
+int acgsymcsrmatrix_set_general_values(
+    struct acgsymcsrmatrix * A,
+    int64_t nnzs,
+    int idxbase,
+    const acgidx_t * rowidx,
+    const acgidx_t * colidx,
+    const double * a)
+{
+    /* allocate transpose-value storage; off-diagonal entries default to
+     * an implicit zero (overwritten below for the symmetric pattern). */
+    free(A->aT);
+    A->aT = malloc((size_t)A->npnzs*sizeof(*A->aT));
+    if (!A->aT) return ACG_ERR_ERRNO;
+    for (int64_t k = 0; k < A->npnzs; k++) A->aT[k] = 0;
+
+    /*
+     * Each undirected edge {r,c} is stored exactly once in the packed
+     * structure, in one orientation. For a general nonzero (r,c,v): if
+     * the edge is stored as (r,c) we set the forward value a[k]=v;
+     * otherwise it is stored as (c,r), so we set the transpose aT[k]=v.
+     * (Setup-time cost is O(sum_r degree(r)^2), negligible for sparse A.)
+     */
+    for (int64_t m = 0; m < nnzs; m++) {
+        acgidx_t r = rowidx[m]-idxbase;
+        acgidx_t c = colidx[m]-idxbase;
+        double v = a[m];
+        if (r < 0 || r >= A->nprows || c < 0 || c >= A->nrows)
+            return ACG_ERR_INDEX_OUT_OF_BOUNDS;
+        int found = 0;
+        for (int64_t k = A->rowptr[r]; k < A->rowptr[r+1]; k++) {
+            if (A->colidx[k]-A->rowidxbase == c) { A->a[k] = v; found = 1; break; }
+        }
+        if (found) continue;
+        for (int64_t k = A->rowptr[c]; k < A->rowptr[c+1]; k++) {
+            if (A->colidx[k]-A->rowidxbase == r) { A->aT[k] = v; break; }
+        }
+    }
     return ACG_SUCCESS;
 }
 
@@ -224,6 +266,7 @@ void acgsymcsrmatrix_free(
     acggraph_free(A->graph);
     free(A->graph);
     free(A->a);
+    free(A->aT);
     free(A->frowptr);
     free(A->fcolidx);
     free(A->fa);
@@ -257,6 +300,7 @@ static void acgsymcsrmatrix_init_from_graph(
     A->frowptr = A->orowptr = NULL;
     A->fcolidx = A->ocolidx = NULL;
     A->fa = A->oa = NULL;
+    A->aT = NULL;
 }
 
 /**
@@ -328,6 +372,15 @@ int acgsymcsrmatrix_copy(
         }
         for (int64_t k = 0; k < dst->fnpnzs; k++) dst->oa[k] = src->oa[k];
     } else { dst->oa = NULL; }
+    if (src->aT) {
+        dst->aT = malloc((size_t)dst->npnzs*sizeof(*dst->aT));
+        if (!dst->aT) {
+            free(dst->oa); free(dst->fa); free(dst->fcolidx); free(dst->frowptr);
+            free(dst->a); acggraph_free(dst->graph); free(dst->graph);
+            return ACG_ERR_ERRNO;
+        }
+        for (int64_t k = 0; k < dst->npnzs; k++) dst->aT[k] = src->aT[k];
+    } else { dst->aT = NULL; }
     return ACG_SUCCESS;
 }
 
@@ -342,6 +395,7 @@ int acgsymcsrmatrix_setzero(
     struct acgsymcsrmatrix * A)
 {
     for (int64_t k = 0; k < A->npnzs; k++) A->a[k] = 0;
+    if (A->aT) { for (int64_t k = 0; k < A->npnzs; k++) A->aT[k] = 0; }
     if (A->fa) { for (int64_t k = 0; k < A->fnpnzs; k++) A->fa[k] = 0; }
     if (A->oa) { for (int64_t k = 0; k < A->onpnzs; k++) A->oa[k] = 0; }
     return ACG_SUCCESS;
@@ -740,12 +794,43 @@ int acgsymcsrmatrix_partition(
             return ACG_ERR_ERRNO;
         }
 
-        /* copy nonzero matrix values to submatrix */
+        /* for nonsymmetric matrices, also carry the transpose values */
+        Ap->aT = NULL;
+        if (A->aT) {
+            Ap->aT = malloc((size_t)Ap->npnzs*sizeof(*Ap->aT));
+            if (!Ap->aT) {
+                free(Ap->a);
+                for (int q = p-1; q >= 0; q--) {
+                    acggraph_free(submatrices[q].graph);
+                    free(submatrices[q].graph);
+                    free(submatrices[q].a);
+                    free(submatrices[q].aT);
+                }
+                for (int q = p; q < nparts; q++) acggraph_free(&subgraphs[q]);
+                free(subgraphs);
+                return ACG_ERR_ERRNO;
+            }
+        }
+
+        /* copy nonzero matrix values to submatrix. The sign of
+         * parentedgeidx encodes the edge orientation relative to the
+         * parent: a negative value means the submatrix stores the edge
+         * in the reversed orientation, so forward and transpose values
+         * are swapped. */
         for (int64_t l = 0; l < Ap->npnzs; l++) {
-            int64_t k = subgraph->parentedgeidx[l] < 0
+            bool reversed = subgraph->parentedgeidx[l] < 0;
+            int64_t k = reversed
                 ? (-subgraph->parentedgeidx[l]-1)
                 : (subgraph->parentedgeidx[l]-1);
-            Ap->a[l] = A->a[k];
+            if (!A->aT) {
+                Ap->a[l] = A->a[k];
+            } else if (reversed) {
+                Ap->a[l] = A->aT[k];
+                Ap->aT[l] = A->a[k];
+            } else {
+                Ap->a[l] = A->a[k];
+                Ap->aT[l] = A->aT[k];
+            }
         }
 
         Ap->fnpnzs = Ap->onpnzs = 0;
@@ -797,7 +882,8 @@ int acgsymcsrmatrix_dsymv_init(
                 A->fcolidx[l] = j+A->rowidxbase; A->fa[l] = A->a[k] + ((i == j) ? eps : 0.0);
                 if (i != j) {
                     int64_t l = A->frowptr[j]++;
-                    A->fcolidx[l] = i+A->rowidxbase; A->fa[l] = A->a[k];
+                    A->fcolidx[l] = i+A->rowidxbase;
+                    A->fa[l] = A->aT ? A->aT[k] : A->a[k];
                 }
             } else {
                 /* int64_t l = A->frowptr[i]++; */
@@ -1083,6 +1169,11 @@ int acgsymcsrmatrix_send(
         /* matrix/submatrix nonzero values */
         MPI_Send64(A->a, A->npnzs, MPI_DOUBLE, recipient, tag, comm);
 
+        /* transpose values for nonsymmetric matrices (symmetric pattern) */
+        bool aT = A->aT;
+        MPI_Send(&aT, 1, MPI_C_BOOL, recipient, tag, comm);
+        if (aT) MPI_Send64(A->aT, A->npnzs, MPI_DOUBLE, recipient, tag, comm);
+
         /* matrix/submatrix nonzeros in full storage format */
         MPI_Send(&A->fnpnzs, 1, MPI_INT64_T, recipient, tag, comm);
         bool frowptr = A->frowptr;
@@ -1160,6 +1251,15 @@ int acgsymcsrmatrix_recv(
         A->a = malloc((size_t)A->npnzs*sizeof(*A->a));
         if (!A->a) return ACG_ERR_ERRNO;
         MPI_Recv64(A->a, A->npnzs, MPI_DOUBLE, sender, tag, comm, MPI_STATUS_IGNORE);
+
+        /* transpose values for nonsymmetric matrices (symmetric pattern) */
+        bool aT;
+        MPI_Recv(&aT, 1, MPI_C_BOOL, sender, tag, comm, MPI_STATUS_IGNORE);
+        if (aT) {
+            A->aT = malloc((size_t)A->npnzs*sizeof(*A->aT));
+            if (!A->aT) return ACG_ERR_ERRNO;
+            MPI_Recv64(A->aT, A->npnzs, MPI_DOUBLE, sender, tag, comm, MPI_STATUS_IGNORE);
+        } else { A->aT = NULL; }
 
         /* matrix/submatrix nonzeros in full storage format */
         MPI_Recv(&A->fnpnzs, 1, MPI_INT64_T, sender, tag, comm, MPI_STATUS_IGNORE);

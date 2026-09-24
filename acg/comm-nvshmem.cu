@@ -32,6 +32,7 @@
 #include "acg/config.h"
 #include "acg/error.h"
 #include "acg/comm.h"
+#include "acg/nvshmem.h"
 
 #ifdef ACG_HAVE_NVSHMEM
 #include <nvshmem.h>
@@ -126,6 +127,31 @@ int acgcomm_init_nvshmem(
     return ACG_ERR_NVSHMEM_NOT_SUPPORTED;
 #endif
 }
+
+/**
+ * ‘acgcomm_init_nvshmem_split()’ creates an NVSHMEM split communicator
+ * with a dedicated allreduce team from a given MPI communicator.
+ */
+int acgcomm_init_nvshmem_split(
+    struct acgcomm * comm,
+    MPI_Comm mpicomm,
+    int * errcode)
+{
+#if defined(ACG_HAVE_NVSHMEM)
+    int err = MPI_Comm_dup(mpicomm, &comm->mpicomm);
+    if (err) { if (errcode) *errcode = err; return ACG_ERR_MPI; }
+    comm->type = acgcomm_nvshmem_split;
+    int32_t team;
+    err = acg_nvshmem_team_split_strided(
+        ACG_NVSHMEM_TEAM_WORLD, 0, 1, nvshmem_n_pes(),
+        comm->nvshmem_num_contexts, &team);
+    if (err) { if (errcode) *errcode = err; return ACG_ERR_NVSHMEM; }
+    comm->nvshmem_team_allreduce = team;
+    return ACG_SUCCESS;
+#else
+    return ACG_ERR_NVSHMEM_NOT_SUPPORTED;
+#endif
+}
 #endif
 
 /**
@@ -136,7 +162,12 @@ void acgcomm_free_nvshmem(
 {
 #if defined(ACG_HAVE_NVSHMEM)
     cudaDeviceSynchronize();
-    if (comm->type == acgcomm_nvshmem) MPI_Comm_free(&comm->mpicomm);
+    if (comm->type == acgcomm_nvshmem) {
+        MPI_Comm_free(&comm->mpicomm);
+    } else if (comm->type == acgcomm_nvshmem_split) {
+        acg_nvshmem_team_destroy(comm->nvshmem_team_allreduce);
+        MPI_Comm_free(&comm->mpicomm);
+    }
 #endif
 }
 
@@ -148,7 +179,7 @@ int acgcomm_size_nvshmem(
     int * commsize)
 {
 #if defined(ACG_HAVE_NVSHMEM)
-    if (comm->type == acgcomm_nvshmem) {
+    if (comm->type == acgcomm_nvshmem || comm->type == acgcomm_nvshmem_split) {
         *commsize = nvshmem_n_pes();
         return ACG_SUCCESS;
     }
@@ -167,7 +198,7 @@ int acgcomm_rank_nvshmem(
     int * rank)
 {
 #if defined(ACG_HAVE_NVSHMEM)
-    if (comm->type == acgcomm_nvshmem) {
+    if (comm->type == acgcomm_nvshmem || comm->type == acgcomm_nvshmem_split) {
         *rank = nvshmem_my_pe();
         return ACG_SUCCESS;
     }
@@ -236,7 +267,7 @@ int acgcomm_nvshmem_register_buffer(
     int * errcode)
 {
 #if defined(ACG_HAVE_NVSHMEM)
-    if (comm->type == acgcomm_nvshmem) {
+    if (comm->type == acgcomm_nvshmem || comm->type == acgcomm_nvshmem_split) {
         if (length == 0) return ACG_SUCCESS;
         int err = nvshmemx_buffer_register(addr, length);
         if (err) { if (errcode) *errcode = err; return ACG_ERR_NVSHMEM; }
@@ -280,6 +311,12 @@ int acgcomm_nvshmem_allreduce(
 #if defined(ACG_HAVE_NVSHMEM)
     if (comm->type == acgcomm_nvshmem) {
         int err = nvshmemx_double_sum_reduce_on_stream(NVSHMEM_TEAM_WORLD, dest, source, nreduce, stream);
+        if (err) { if (errcode) *errcode = err; return ACG_ERR_NVSHMEM; }
+        return ACG_SUCCESS;
+    }
+    if (comm->type == acgcomm_nvshmem_split) {
+        int err = acg_nvshmemx_double_sum_reduce_on_stream(
+            (acg_nvshmem_team_t)comm->nvshmem_team_allreduce, dest, source, nreduce, stream);
         if (err) { if (errcode) *errcode = err; return ACG_ERR_NVSHMEM; }
         return ACG_SUCCESS;
     }

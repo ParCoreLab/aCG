@@ -40,12 +40,12 @@
 
 __global__ void acghalo_pack_cuda_double(
     int sendbufsize,
-    double * sendbuf,
+    double *sendbuf,
     int srcbufsize,
-    const double * srcbuf,
-    const int * srcbufidx)
+    const double *srcbuf,
+    const int *srcbufidx)
 {
-    for (int i = blockIdx.x*blockDim.x+threadIdx.x;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x;
          i < sendbufsize;
          i += blockDim.x * gridDim.x)
     {
@@ -67,38 +67,49 @@ __global__ void acghalo_pack_cuda_double(
  */
 int acghalo_pack_cuda(
     int sendbufsize,
-    void * d_sendbuf,
+    void *d_sendbuf,
     enum acgdatatype datatype,
     int srcbufsize,
-    const void * d_srcbuf,
-    const int * d_srcbufidx,
+    const void *d_srcbuf,
+    const int *d_srcbufidx,
     cudaStream_t stream,
-    int64_t * nbytes,
-    int * errcode)
+    int64_t *nbytes,
+    int numSMs,
+    int *errcode)
 {
-    if (datatype == ACG_DOUBLE) {
+    int err;
+    if (datatype == ACG_DOUBLE)
+    {
         static int mingridsize = 0, blocksize = 0;
-        if (mingridsize == 0 && blocksize == 0) {
+        if (mingridsize == 0 && blocksize == 0)
+        {
             cudaOccupancyMaxPotentialBlockSize(
                 &mingridsize, &blocksize, acghalo_pack_cuda_double, 0, 0);
         }
-        acghalo_pack_cuda_double<<<mingridsize,blocksize,0,stream>>>(
-            sendbufsize, (double *) d_sendbuf,
-            srcbufsize, (const double *) d_srcbuf, d_srcbufidx);
-        if (cudaPeekAtLastError()) return ACG_ERR_CUDA;
-        if (nbytes) *nbytes += sendbufsize*(2*sizeof(double)+sizeof(*d_srcbufidx));
-    } else { return ACG_ERR_NOT_SUPPORTED; }
+        mingridsize = 9;
+        acghalo_pack_cuda_double<<<mingridsize, blocksize, 0, stream>>>(
+            sendbufsize, (double *)d_sendbuf,
+            srcbufsize, (const double *)d_srcbuf, d_srcbufidx);
+        if (cudaPeekAtLastError())
+            return ACG_ERR_CUDA;
+        if (nbytes)
+            *nbytes += sendbufsize * (2 * sizeof(double) + sizeof(*d_srcbufidx));
+    }
+    else
+    {
+        return ACG_ERR_NOT_SUPPORTED;
+    }
     return ACG_SUCCESS;
 }
 
 __global__ void acghalo_unpack_cuda_double(
     int recvbufsize,
-    const double * recvbuf,
+    const double *recvbuf,
     int dstbufsize,
-    double * dstbuf,
-    const int * dstbufidx)
+    double *dstbuf,
+    const int *dstbufidx)
 {
-    for (int i = blockIdx.x*blockDim.x+threadIdx.x;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x;
          i < recvbufsize;
          i += blockDim.x * gridDim.x)
     {
@@ -120,27 +131,38 @@ __global__ void acghalo_unpack_cuda_double(
  */
 int acghalo_unpack_cuda(
     int recvbufsize,
-    const void * d_recvbuf,
+    const void *d_recvbuf,
     enum acgdatatype datatype,
     int dstbufsize,
-    void * d_dstbuf,
-    const int * d_dstbufidx,
+    void *d_dstbuf,
+    const int *d_dstbufidx,
     cudaStream_t stream,
-    int64_t * nbytes,
-    int * errcode)
+    int64_t *nbytes,
+    int numSMs,
+    int *errcode)
 {
-    if (datatype == ACG_DOUBLE) {
+    int err;
+    if (datatype == ACG_DOUBLE)
+    {
         static int mingridsize = 0, blocksize = 0;
-        if (mingridsize == 0 && blocksize == 0) {
+        if (mingridsize == 0 && blocksize == 0)
+        {
             cudaOccupancyMaxPotentialBlockSize(
                 &mingridsize, &blocksize, acghalo_unpack_cuda_double, 0, 0);
         }
-        acghalo_unpack_cuda_double<<<mingridsize,blocksize,0,stream>>>(
-            recvbufsize, (const double *) d_recvbuf,
-            dstbufsize, (double *) d_dstbuf, d_dstbufidx);
-        if (cudaPeekAtLastError()) return ACG_ERR_CUDA;
-        if (nbytes) *nbytes += recvbufsize*(2*sizeof(double)+sizeof(*d_dstbufidx));
-    } else { return ACG_ERR_NOT_SUPPORTED; }
+        mingridsize = 9;
+        acghalo_unpack_cuda_double<<<mingridsize, blocksize, 0, stream>>>(
+            recvbufsize, (const double *)d_recvbuf,
+            dstbufsize, (double *)d_dstbuf, d_dstbufidx);
+        if (cudaPeekAtLastError())
+            return ACG_ERR_CUDA;
+        if (nbytes)
+            *nbytes += recvbufsize * (2 * sizeof(double) + sizeof(*d_dstbufidx));
+    }
+    else
+    {
+        return ACG_ERR_NOT_SUPPORTED;
+    }
     return ACG_SUCCESS;
 }
 
@@ -180,29 +202,29 @@ int acghalo_unpack_cuda(
  */
 int halo_alltoallv_nvshmem(
     int sendsize,
-    const void * d_sendbuf,
+    const void *d_sendbuf,
     int nrecipients,
-    const int * recipients,
-    const int * sendcounts,
-    const int * sdispls,
+    const int *recipients,
+    const int *sendcounts,
+    const int *sdispls,
     acgdatatype sendtype,
-    const int * putdispls,
-    uint64_t * d_received,
-    uint64_t * d_readytoreceive,
+    const int *putdispls,
+    uint64_t *d_received,
+    uint64_t *d_readytoreceive,
     int recvsize,
-    void * d_recvbuf,
+    void *d_recvbuf,
     int nsenders,
-    const int * senders,
-    const int * recvcounts,
-    const int * rdispls,
+    const int *senders,
+    const int *recvcounts,
+    const int *rdispls,
     acgdatatype recvtype,
     MPI_Comm comm,
     cudaStream_t stream,
-    int * errcode,
-    int64_t * nsendmsgs,
-    int64_t * nsendbytes,
-    int64_t * nrecvmsgs,
-    int64_t * nrecvbytes)
+    int *errcode,
+    int64_t *nsendmsgs,
+    int64_t *nsendbytes,
+    int64_t *nrecvmsgs,
+    int64_t *nrecvbytes)
 {
 #if defined(ACG_HAVE_NVSHMEM)
     int commsize, rank;
@@ -210,31 +232,38 @@ int halo_alltoallv_nvshmem(
     MPI_Comm_rank(comm, &rank);
     int err;
     int sendtypesize, recvtypesize;
-    if (sendtype == ACG_DOUBLE) sendtypesize = sizeof(double);
-    else return ACG_ERR_NOT_SUPPORTED;
-    if (recvtype == ACG_DOUBLE) recvtypesize = sizeof(double);
-    else return ACG_ERR_NOT_SUPPORTED;
+    if (sendtype == ACG_DOUBLE)
+        sendtypesize = sizeof(double);
+    else
+        return ACG_ERR_NOT_SUPPORTED;
+    if (recvtype == ACG_DOUBLE)
+        recvtypesize = sizeof(double);
+    else
+        return ACG_ERR_NOT_SUPPORTED;
 
     /* post PUT operations */
     nvshmemx_sync_all_on_stream(stream);
-    for (int p = 0; p < nrecipients; p++) {
+    for (int p = 0; p < nrecipients; p++)
+    {
 #if defined(ACG_DEBUG_HALO)
-        fprintf(stderr, "%s: posting PUT %d of %d from rank %d of size %d at offset %d for recipient %d at offset %d\n", __func__, p+1, nrecipients, nvshmem_my_pe() /* rank */, sendcounts[p], sdispls[p], recipients[p], putdispls[p]);
+        fprintf(stderr, "%s: posting PUT %d of %d from rank %d of size %d at offset %d for recipient %d at offset %d\n", __func__, p + 1, nrecipients, nvshmem_my_pe() /* rank */, sendcounts[p], sdispls[p], recipients[p], putdispls[p]);
 #endif
-        const double * d_sendbufp = (const double *) d_sendbuf + sdispls[p];
-        double * d_recvbufp = (double *) d_recvbuf + putdispls[p];
+        const double *d_sendbufp = (const double *)d_sendbuf + sdispls[p];
+        double *d_recvbufp = (double *)d_recvbuf + putdispls[p];
         /* nvshmemx_double_put_on_stream(d_recvbufp, d_sendbufp, sendcounts[p], recipients[p], stream); */
         nvshmemx_double_put_signal_on_stream(
             d_recvbufp, d_sendbufp, sendcounts[p],
             d_received, 1, NVSHMEM_SIGNAL_ADD,
             recipients[p], stream);
-        if (nsendbytes) *nsendbytes += sendcounts[p]*sendtypesize;
+        if (nsendbytes)
+            *nsendbytes += sendcounts[p] * sendtypesize;
     }
     /* nvshmemx_barrier_all_on_stream(stream); */
     nvshmemx_signal_wait_until_on_stream(
         d_received, NVSHMEM_CMP_GE, nsenders, stream);
     cudaMemsetAsync(d_received, 0, sizeof(*d_received), stream);
-    if (nsendmsgs) *nsendmsgs += nrecipients;
+    if (nsendmsgs)
+        *nsendmsgs += nrecipients;
     return ACG_SUCCESS;
 #else
     return ACG_ERR_NVSHMEM_NOT_SUPPORTED;

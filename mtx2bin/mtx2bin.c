@@ -43,6 +43,7 @@
 #include <string.h>
 
 #include <errno.h>
+#include <limits.h>
 #include <sched.h>
 
 const char * program_name = "mtx2bin";

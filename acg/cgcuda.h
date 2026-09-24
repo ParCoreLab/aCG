@@ -46,257 +46,412 @@
 #include <cusparse.h>
 #endif
 
+#ifdef ACG_HAVE_HYPRE
+#include "HYPRE.h"
+#include "HYPRE_parcsr_ls.h"
+#include "HYPRE_IJ_mv.h"
+#endif
+
 #include <stdbool.h>
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
-extern "C" {
+extern "C"
+{
 #endif
 
-struct acgcomm;
-struct acghalo;
-struct acgsymcsrmatrix;
+    struct acgcomm;
+    struct acghalo;
+    struct acgsymcsrmatrix;
 
-/**
- * ‘acgsolvercuda’ is a data structure for use with a conjugate
- * gradient-based iterative solver.
- *
- * It consists of three temporary vectors, r, p and t, which are used
- * throughout the iterative solution procedure.
- */
-struct acgsolvercuda
-{
-    /* vectors */
-    struct acgvector r;
-    struct acgvector p;
-    struct acgvector t;
-    struct acgvector * w, * q, * z;
-    struct acgvector * dx;
+    /**
+     * ‘acgsolvercuda’ is a data structure for use with a conjugate
+     * gradient-based iterative solver.
+     *
+     * It consists of three temporary vectors, r, p and t, which are used
+     * throughout the iterative solution procedure.
+     */
+    struct acgsolvercuda
+    {
+        /* vectors */
+        struct acgvector r;
+        struct acgvector p;
+        struct acgvector t;
+        struct acgvector *w, *q, *z, *m, *n, *u, *y;
+        struct acgvector *dx;
 
-    /* “halo exchange” communication */
-    struct acghalo * halo;
-    struct acghaloexchange * haloexchange;
+        /* “halo exchange” communication */
+        struct acghalo *halo;
+        struct acghaloexchange *haloexchange;
 
-    /* stopping criterion */
-    int maxits;
-    double diffatol;
-    double diffrtol;
-    double residualatol;
-    double residualrtol;
+        /* stopping criterion */
+        int maxits;
+        double diffatol;
+        double diffrtol;
+        double residualatol;
+        double residualrtol;
 
-    /* norms of right-hand side, initial guess, residual, and so on,
-     * needed for convergence tests and to provide diagnostics */
-    double bnrm2;
-    double r0nrm2, rnrm2;
-    double x0nrm2, dxnrm2;
+        /* norms of right-hand side, initial guess, residual, and so on,
+         * needed for convergence tests and to provide diagnostics */
+        double bnrm2;
+        double r0nrm2, rnrm2;
+        double x0nrm2, dxnrm2;
 
-    /* device-side constants */
-    double * d_minus_one, * d_one, * d_zero, * d_inf;
+        /* device-side constants */
+        double *d_minus_one, *d_one, *d_zero, *d_inf;
 
-    /* device-side data */
-    double * d_bnrm2sqr, * d_r0nrm2sqr, * d_rnrm2sqr, * d_rnrm2sqr_prev;
-    double * d_pdott, * d_alpha, * d_minus_alpha, * d_beta;
-    int * d_niterations, * d_converged;
-    double * d_r, * d_p, * d_t, * d_w, * d_q, * d_z;
-    acgidx_t * d_rowptr, * d_orowptr;
-    acgidx_t * d_colidx, * d_ocolidx;
-    double * d_a, * d_oa;
-    int use_nvshmem;
+        /* device-side data */
+        double *d_bnrm2sqr, *d_r0nrm2sqr, *d_rnrm2sqr, *d_rnrm2sqr_prev;
+        double *d_pdott, *d_alpha, *d_minus_alpha, *d_beta;
+        int *d_niterations, *d_converged;
+        double *d_r, *d_p, *d_t, *d_w, *d_q, *d_z, *d_m, *d_n, *d_u, *d_y;
+        acgidx_t *d_rowptr, *d_orowptr;
+        acgidx_t *d_colidx, *d_ocolidx;
+        double *d_a, *d_oa;
+        int use_nvshmem;
+        int use_nccl_split;
 
-    /* solver statistics, including the number of solves, iterations,
-     * floating-point operations, and a performance breakdown of time
-     * spent in different parts. */
-    int nsolves, ntotaliterations, niterations;
-    int64_t nflops;
-    double tsolve;
-    double tgemv, tdot, tnrm2, taxpy, tcopy, tallreduce, thalo;
-    int64_t ngemv, ndot, nnrm2, naxpy, ncopy, nallreduce, nhalo;
-    int64_t Bgemv, Bdot, Bnrm2, Baxpy, Bcopy, Ballreduce, Bhalo;
-    int64_t nhalomsgs;
-};
+        /* solver statistics, including the number of solves, iterations,
+         * floating-point operations, and a performance breakdown of time
+         * spent in different parts. */
+        int nsolves, ntotaliterations, niterations;
+        int64_t nflops;
+        double tsolve;
+        double tgemv, tgemv_o, tdot, tnrm2, taxpy, tcopy, tallreduce, thalo, tprecond;
+        int64_t ngemv, ngemv_o, ndot, nnrm2, naxpy, ncopy, nallreduce, nhalo, nprecond;
+        int64_t Bgemv, Bdot, Bnrm2, Baxpy, Bcopy, Ballreduce, Bhalo, Bprecond;
+        int64_t nhalomsgs;
+    };
 
-/*
- * memory management
- */
+    /*
+     * memory management
+     */
 
-/**
- * ‘acgsolvercuda_free()’ frees storage allocated for a solver.
- */
-ACG_API void acgsolvercuda_free(
-    struct acgsolvercuda * cg);
+    /**
+     * ‘acgsolvercuda_free()’ frees storage allocated for a solver.
+     */
+    ACG_API void acgsolvercuda_free(struct acgsolvercuda *cg);
 
-/*
- * initialise a solver
- */
+    /*
+     * initialise a solver
+     */
 
 #if defined(ACG_HAVE_CUBLAS) && defined(ACG_HAVE_CUSPARSE)
-/**
- * ‘acgsolvercuda_init()’ sets up a conjugate gradient solver for a given
- * symmetric sparse matrix in CSR format.
- *
- * The matrix may be partitioned and distributed.
- */
-ACG_API int acgsolvercuda_init(
-    struct acgsolvercuda * cg,
-    const struct acgsymcsrmatrix * A,
-    cublasHandle_t cublas,
-    cusparseHandle_t cusparse,
-    const struct acgcomm * comm);
+    /**
+     * ‘acgsolvercuda_init()’ sets up a conjugate gradient solver for a given
+     * symmetric sparse matrix in CSR format.
+     *
+     * The matrix may be partitioned and distributed.
+     */
+    ACG_API int acgsolvercuda_init(
+        struct acgsolvercuda *cg,
+        const struct acgsymcsrmatrix *A,
+        cublasHandle_t cublas,
+        cusparseHandle_t cusparse,
+        const struct acgcomm *comm);
 #endif
 
-/**
- * ‘acgsolvercuda_solve()’ solves the given linear system, Ax=b, using the
- * conjugate gradient method.
- *
- * The solver must already have been configured with ‘acgsolvercuda_init()’
- * for a linear system Ax=b, and the dimensions of the vectors b and x
- * must match the number of columns and rows of A, respectively.
- *
- * The stopping criterion are:
- *
- *  - ‘maxits’, the maximum number of iterations to perform
- *  - ‘diffatol’, an absolute tolerance for the change in solution, ‖δx‖ < γₐ
- *  - ‘diffrtol’, a relative tolerance for the change in solution, ‖δx‖/‖x₀‖ < γᵣ
- *  - ‘residualatol’, an absolute tolerance for the residual, ‖b-Ax‖ < εₐ
- *  - ‘residualrtol’, a relative tolerance for the residual, ‖b-Ax‖/‖b-Ax₀‖ < εᵣ
- *
- * The iterative solver converges if
- *
- *   ‖δx‖ < γₐ, ‖δx‖ < γᵣ‖x₀‖, ‖b-Ax‖ < εₐ or ‖b-Ax‖ < εᵣ‖b-Ax₀‖.
- *
- * To skip the convergence test for any one of the above stopping
- * criterion, the associated tolerance may be set to zero.
- */
-ACG_API int acgsolvercuda_solve(
-    struct acgsolvercuda * cg,
-    const struct acgsymcsrmatrix * A,
-    const struct acgvector * b,
-    struct acgvector * x,
-    int maxits,
-    double diffatol,
-    double diffrtol,
-    double residualatol,
-    double residualrtol,
-    int warmup);
+    /**
+     * ‘acgsolvercuda_solve()’ solves the given linear system, Ax=b, using the
+     * conjugate gradient method.
+     *
+     * The solver must already have been configured with ‘acgsolvercuda_init()’
+     * for a linear system Ax=b, and the dimensions of the vectors b and x
+     * must match the number of columns and rows of A, respectively.
+     *
+     * The stopping criterion are:
+     *
+     *  - ‘maxits’, the maximum number of iterations to perform
+     *  - ‘diffatol’, an absolute tolerance for the change in solution, ‖δx‖ <
+     * γₐ
+     *  - ‘diffrtol’, a relative tolerance for the change in solution, ‖δx‖/‖x₀‖
+     * < γᵣ
+     *  - ‘residualatol’, an absolute tolerance for the residual, ‖b-Ax‖ < εₐ
+     *  - ‘residualrtol’, a relative tolerance for the residual, ‖b-Ax‖/‖b-Ax₀‖
+     * < εᵣ
+     *
+     * The iterative solver converges if
+     *
+     *   ‖δx‖ < γₐ, ‖δx‖ < γᵣ‖x₀‖, ‖b-Ax‖ < εₐ or ‖b-Ax‖ < εᵣ‖b-Ax₀‖.
+     *
+     * To skip the convergence test for any one of the above stopping
+     * criterion, the associated tolerance may be set to zero.
+     */
+    ACG_API int acgsolvercuda_solve(
+        struct acgsolvercuda *cg,
+        const struct acgsymcsrmatrix *A,
+        const struct acgvector *b,
+        struct acgvector *x,
+        int maxits,
+        double diffatol,
+        double diffrtol,
+        double residualatol,
+        double residualrtol,
+        int warmup);
 
 #if defined(ACG_HAVE_MPI) && defined(ACG_HAVE_CUBLAS) && defined(ACG_HAVE_CUSPARSE)
-/**
- * ‘acgsolvercuda_solvempi()’ solves the given linear system, Ax=b, using
- * the conjugate gradient method. The linear system may be distributed
- * across multiple processes and communication is handled using MPI.
- *
- * The solver must already have been configured with ‘acgsolvercuda_init()’
- * for a linear system Ax=b, and the dimensions of the vectors b and x
- * must match the number of columns and rows of A, respectively.
- *
- * The stopping criterion are:
- *
- *  - ‘maxits’, the maximum number of iterations to perform
- *  - ‘diffatol’, an absolute tolerance for the change in solution, ‖δx‖ < γₐ
- *  - ‘diffrtol’, a relative tolerance for the change in solution, ‖δx‖/‖x₀‖ < γᵣ
- *  - ‘residualatol’, an absolute tolerance for the residual, ‖b-Ax‖ < εₐ
- *  - ‘residualrtol’, a relative tolerance for the residual, ‖b-Ax‖/‖b-Ax₀‖ < εᵣ
- *
- * The iterative solver converges if
- *
- *   ‖δx‖ < γₐ, ‖δx‖ < γᵣ‖x₀‖, ‖b-Ax‖ < εₐ or ‖b-Ax‖ < εᵣ‖b-Ax₀‖.
- *
- * To skip the convergence test for any one of the above stopping
- * criterion, the associated tolerance may be set to zero.
- */
-ACG_API int acgsolvercuda_solvempi(
-    struct acgsolvercuda * cg,
-    const struct acgsymcsrmatrix * A,
-    const struct acgvector * b,
-    struct acgvector * x,
-    int maxits,
-    double diffatol,
-    double diffrtol,
-    double residualatol,
-    double residualrtol,
-    int warmup,
-    struct acgcomm * comm,
-    int tag,
-    int * errcode,
-    cublasHandle_t cublas,
-    cusparseHandle_t cusparse,
-    cusparseSpMVAlg_t cusparse_spmv_alg);
+    /**
+     * ‘acgsolvercuda_solvempi()’ solves the given linear system, Ax=b, using
+     * the conjugate gradient method. The linear system may be distributed
+     * across multiple processes and communication is handled using MPI.
+     *
+     * The solver must already have been configured with ‘acgsolvercuda_init()’
+     * for a linear system Ax=b, and the dimensions of the vectors b and x
+     * must match the number of columns and rows of A, respectively.
+     *
+     * The stopping criterion are:
+     *
+     *  - ‘maxits’, the maximum number of iterations to perform
+     *  - ‘diffatol’, an absolute tolerance for the change in solution, ‖δx‖ <
+     * γₐ
+     *  - ‘diffrtol’, a relative tolerance for the change in solution, ‖δx‖/‖x₀‖
+     * < γᵣ
+     *  - ‘residualatol’, an absolute tolerance for the residual, ‖b-Ax‖ < εₐ
+     *  - ‘residualrtol’, a relative tolerance for the residual, ‖b-Ax‖/‖b-Ax₀‖
+     * < εᵣ
+     *
+     * The iterative solver converges if
+     *
+     *   ‖δx‖ < γₐ, ‖δx‖ < γᵣ‖x₀‖, ‖b-Ax‖ < εₐ or ‖b-Ax‖ < εᵣ‖b-Ax₀‖.
+     *
+     * To skip the convergence test for any one of the above stopping
+     * criterion, the associated tolerance may be set to zero.
+     */
+    ACG_API int acgsolvercuda_solvempi(
+        struct acgsolvercuda *cg,
+        const struct acgsymcsrmatrix *A,
+        const struct acgvector *b,
+        struct acgvector *x,
+        int maxits,
+        double diffatol,
+        double diffrtol,
+        double residualatol,
+        double residualrtol,
+        int warmup,
+        struct acgcomm *comm,
+        int tag,
+        int *errcode,
+        cublasHandle_t cublas,
+        cusparseHandle_t cusparse,
+        cusparseSpMVAlg_t cusparse_spmv_alg);
 
-/**
- * ‘acgsolvercuda_solve_pipelined()’ solves the given linear system,
- * Ax=b, using a pipelined conjugate gradient method. The linear
- * system may be distributed across multiple processes and
- * communication is handled using MPI.
- *
- * The solver must already have been configured with ‘acgsolvercuda_init()’
- * for a linear system Ax=b, and the dimensions of the vectors b and x
- * must match the number of columns and rows of A, respectively.
- *
- * The stopping criterion are:
- *
- *  - ‘maxits’, the maximum number of iterations to perform
- *  - ‘diffatol’, an absolute tolerance for the change in solution, ‖δx‖ < γₐ
- *  - ‘diffrtol’, a relative tolerance for the change in solution, ‖δx‖/‖x₀‖ < γᵣ
- *  - ‘residualatol’, an absolute tolerance for the residual, ‖b-Ax‖ < εₐ
- *  - ‘residualrtol’, a relative tolerance for the residual, ‖b-Ax‖/‖b-Ax₀‖ < εᵣ
- *
- * The iterative solver converges if
- *
- *   ‖δx‖ < γₐ, ‖δx‖ < γᵣ‖x₀‖, ‖b-Ax‖ < εₐ or ‖b-Ax‖ < εᵣ‖b-Ax₀‖.
- *
- * To skip the convergence test for any one of the above stopping
- * criterion, the associated tolerance may be set to zero.
- */
-ACG_API int acgsolvercuda_solve_pipelined(
-    struct acgsolvercuda * cg,
-    const struct acgsymcsrmatrix * A,
-    const struct acgvector * b,
-    struct acgvector * x,
-    int maxits,
-    double diffatol,
-    double diffrtol,
-    double residualatol,
-    double residualrtol,
-    int warmup,
-    struct acgcomm * comm,
-    int tag,
-    int * errcode,
-    cublasHandle_t cublas,
-    cusparseHandle_t cusparse);
+    /**
+     * ‘acgsolvercuda_solve_pipelined()’ solves the given linear system,
+     * Ax=b, using a pipelined conjugate gradient method. The linear
+     * system may be distributed across multiple processes and
+     * communication is handled using MPI.
+     *
+     * The solver must already have been configured with ‘acgsolvercuda_init()’
+     * for a linear system Ax=b, and the dimensions of the vectors b and x
+     * must match the number of columns and rows of A, respectively.
+     *
+     * The stopping criterion are:
+     *
+     *  - ‘maxits’, the maximum number of iterations to perform
+     *  - ‘diffatol’, an absolute tolerance for the change in solution, ‖δx‖ <
+     * γₐ
+     *  - ‘diffrtol’, a relative tolerance for the change in solution, ‖δx‖/‖x₀‖
+     * < γᵣ
+     *  - ‘residualatol’, an absolute tolerance for the residual, ‖b-Ax‖ < εₐ
+     *  - ‘residualrtol’, a relative tolerance for the residual, ‖b-Ax‖/‖b-Ax₀‖
+     * < εᵣ
+     *
+     * The iterative solver converges if
+     *
+     *   ‖δx‖ < γₐ, ‖δx‖ < γᵣ‖x₀‖, ‖b-Ax‖ < εₐ or ‖b-Ax‖ < εᵣ‖b-Ax₀‖.
+     *
+     * To skip the convergence test for any one of the above stopping
+     * criterion, the associated tolerance may be set to zero.
+     */
+    ACG_API int acgsolvercuda_solve_pipelined(
+        struct acgsolvercuda *cg,
+        const struct acgsymcsrmatrix *A,
+        const struct acgvector *b,
+        struct acgvector *x,
+        int maxits,
+        double diffatol,
+        double diffrtol,
+        double residualatol,
+        double residualrtol,
+        int warmup,
+        struct acgcomm *comm,
+        int tag,
+        int *errcode,
+        cublasHandle_t cublas,
+        cusparseHandle_t cusparse);
+
+    /**
+     * ‘acgsolvercuda_solve_preconditioned()’ solves the given linear system,
+     * Ax=b, using a preconditioned conjugate gradient method. The linear
+     * system may be distributed across multiple processes and
+     * communication is handled using MPI.
+     *
+     * The solver must already have been configured with ‘acgsolvercuda_init()’
+     * for a linear system Ax=b, and the dimensions of the vectors b and x
+     * must match the number of columns and rows of A, respectively.
+     *
+     * The stopping criterion are:
+     *
+     *  - ‘maxits’, the maximum number of iterations to perform
+     *  - ‘diffatol’, an absolute tolerance for the change in solution, ‖δx‖ <
+     * γₐ
+     *  - ‘diffrtol’, a relative tolerance for the change in solution, ‖δx‖/‖x₀‖
+     * < γᵣ
+     *  - ‘residualatol’, an absolute tolerance for the residual, ‖b-Ax‖ < εₐ
+     *  - ‘residualrtol’, a relative tolerance for the residual, ‖b-Ax‖/‖b-Ax₀‖
+     * < εᵣ
+     *
+     * The iterative solver converges if
+     *
+     *   ‖δx‖ < γₐ, ‖δx‖ < γᵣ‖x₀‖, ‖b-Ax‖ < εₐ or ‖b-Ax‖ < εᵣ‖b-Ax₀‖.
+     *
+     * To skip the convergence test for any one of the above stopping
+     * criterion, the associated tolerance may be set to zero.
+     */
+
+    ACG_API int acgsolvercuda_solve_preconditioned(
+        struct acgsolvercuda *cg,
+        const struct acgsymcsrmatrix *A,
+        const struct acgvector *b,
+        struct acgvector *x,
+        int maxits,
+        double diffatol,
+        double diffrtol,
+        double residualatol,
+        double residualrtol,
+        int warmup,
+        struct acgcomm *comm,
+        int tag,
+        int *errcode,
+        int preconditioner,
+        cublasHandle_t cublas,
+        cusparseHandle_t cusparse,
+        cusparseSpMVAlg_t cusparse_spmv_alg);
+
+    ACG_API int acgsolvercuda_solve_pipelined_preconditioned(
+        struct acgsolvercuda *cg,
+        const struct acgsymcsrmatrix *A,
+        const struct acgvector *b,
+        struct acgvector *x,
+        int maxits,
+        double diffatol,
+        double diffrtol,
+        double residualatol,
+        double residualrtol,
+        int warmup,
+        struct acgcomm *comm,
+        int tag,
+        int *errcode,
+        int preconditioner,
+        cublasHandle_t cublas,
+        cusparseHandle_t cusparse);
+
+    /**
+     * ‘acgsolvercuda_solve_preconditioned_bicgstab()’ solves the given linear
+     * system, Ax=b, using a preconditioned stabilised bi-conjugate gradient
+     * (BiCGStab) method. The preconditioner is selected by ‘preconditioner’:
+     * 0 -> none, 1 -> Jacobi, 2 -> ILU(0).
+     */
+    ACG_API int acgsolvercuda_solve_preconditioned_bicgstab(
+        struct acgsolvercuda *cg,
+        const struct acgsymcsrmatrix *A,
+        const struct acgvector *b,
+        struct acgvector *x,
+        int maxits,
+        double diffatol,
+        double diffrtol,
+        double residualatol,
+        double residualrtol,
+        int warmup,
+        struct acgcomm *comm,
+        int tag,
+        int *errcode,
+        int preconditioner,
+        cublasHandle_t cublas,
+        cusparseHandle_t cusparse);
+
+    /**
+     * ‘acgsolvercuda_solve_pipelined_bicgstab()’ solves the given linear
+     * system, Ax=b, using the communication-hiding pipelined BiCGStab method
+     * (Cools & Vanroose, 2017), without a preconditioner. The two global
+     * reductions per iteration are overlapped with the two sparse
+     * matrix-vector products.
+     */
+    ACG_API int acgsolvercuda_solve_pipelined_bicgstab(
+        struct acgsolvercuda *cg,
+        const struct acgsymcsrmatrix *A,
+        const struct acgvector *b,
+        struct acgvector *x,
+        int maxits,
+        double diffatol,
+        double diffrtol,
+        double residualatol,
+        double residualrtol,
+        int warmup,
+        struct acgcomm *comm,
+        int tag,
+        int *errcode,
+        cublasHandle_t cublas,
+        cusparseHandle_t cusparse);
+
+    /**
+     * ‘acgsolvercuda_solve_pipelined_bicgstab_rr()’ solves the given linear
+     * system, Ax=b, using the communication-hiding pipelined BiCGStab method
+     * (Cools & Vanroose, 2017), without a preconditioner, augmented with
+     * PETSc-style periodic residual replacement (mirrors PETSc KSPPIPEBCGS):
+     * every ACG_BICGSTAB_RR_PERIOD iterations the recurrence-propagated
+     * vectors r,w,t,s,z,v are recomputed from x and p with explicit SpMVs to
+     * reset accumulated rounding error. The two global reductions per
+     * iteration are overlapped with the two sparse matrix-vector products.
+     */
+    ACG_API int acgsolvercuda_solve_pipelined_bicgstab_rr(
+        struct acgsolvercuda *cg,
+        const struct acgsymcsrmatrix *A,
+        const struct acgvector *b,
+        struct acgvector *x,
+        int maxits,
+        double diffatol,
+        double diffrtol,
+        double residualatol,
+        double residualrtol,
+        int warmup,
+        struct acgcomm *comm,
+        int tag,
+        int *errcode,
+        cublasHandle_t cublas,
+        cusparseHandle_t cusparse);
 #endif
 
-/*
- * output solver info
- */
+    /*
+     * output solver info
+     */
 
-/**
- * ‘acgsolvercuda_fwrite()’ outputs the status of a solver.
- *
- * This is normally used after calling ‘acgsolvercuda_solve()’ to print a
- * message to report the status of the solver together with various
- * useful statistics.
- */
-ACG_API int acgsolvercuda_fwrite(
-    FILE * f,
-    const struct acgsolvercuda * cg,
-    int indent);
+    /**
+     * ‘acgsolvercuda_fwrite()’ outputs the status of a solver.
+     *
+     * This is normally used after calling ‘acgsolvercuda_solve()’ to print
+     * a message to report the status of the solver together with various
+     * useful statistics.
+     */
+    ACG_API int
+    acgsolvercuda_fwrite(FILE *f, const struct acgsolvercuda *cg, int indent);
 
 #ifdef ACG_HAVE_MPI
-/**
- * ‘acgsolvercuda_fwritempi()’ outputs the status of a solver.
- *
- * This is normally used after calling ‘acgsolvercuda_solve()’ to print a
- * message to report the status of the solver together with various
- * useful statistics.
- */
-ACG_API int acgsolvercuda_fwritempi(
-    FILE * f,
-    const struct acgsolvercuda * cg,
-    int indent,
-    int verbose,
-    MPI_Comm comm,
-    int root);
+    /**
+     * ‘acgsolvercuda_fwritempi()’ outputs the status of a solver.
+     *
+     * This is normally used after calling ‘acgsolvercuda_solve()’ to print a
+     * message to report the status of the solver together with various
+     * useful statistics.
+     */
+    ACG_API int acgsolvercuda_fwritempi(
+        FILE *f,
+        const struct acgsolvercuda *cg,
+        int indent,
+        int verbose,
+        MPI_Comm comm,
+        int root);
 #endif
 
 #ifdef __cplusplus

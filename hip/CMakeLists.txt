@@ -75,6 +75,8 @@ set(PROJECT_SOURCES
         acg-hip.c
         )
 
+add_definitions(-D_GNU_SOURCE)
+
 include(CheckCSourceCompiles)
 check_c_source_compiles(
 "#define _POSIX_C_SOURCE 200112L
@@ -172,6 +174,15 @@ target_include_directories(${PROJECT_NAME} PRIVATE ${MPI_INCLUDE_DIRS})
 
 if(OpenMP_C_FOUND)
     target_link_libraries(${PROJECT_NAME} OpenMP::OpenMP_C)
+    # The final link of this target is driven by ROCm's clang++ (required for
+    # --hip-link/--offload-arch), not the Cray cc/CC wrapper, so the Cray
+    # OpenMP runtime that provides __kmpc_*/_cray$mt_* symbols is not linked
+    # in implicitly. Find and link it explicitly.
+    string(REPLACE ":" ";" ACG_CRAY_LIBRARY_PATHS "$ENV{CRAY_LD_LIBRARY_PATH}")
+    find_library(CRAY_OPENMP_LIBRARY NAMES craymp PATHS ${ACG_CRAY_LIBRARY_PATHS})
+    if(CRAY_OPENMP_LIBRARY)
+        target_link_libraries(${PROJECT_NAME} ${CRAY_OPENMP_LIBRARY})
+    endif()
 endif()
 if (METIS_FOUND)
   target_include_directories(${PROJECT_NAME} PRIVATE ${METIS_INCLUDE_DIRS})
