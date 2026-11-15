@@ -1,17 +1,17 @@
 # aCG: GPU-Accelerated Iterative Linear Solvers
 
-**aCG** is a suite of GPU-accelerated iterative linear solvers based on the conjugate gradient (CG) method. It supports NVIDIA and AMD GPUs, as well as multi-GPU systems utilizing GPU-aware MPI, NCCL, RCCL, or NVSHMEM.
+**aCG** is a suite of GPU-accelerated iterative linear solvers based on Krylov subspace methods, including the conjugate gradient (CG) method and the stabilized biconjugate gradient (BiCGStab) method. It supports NVIDIA and AMD GPUs, as well as multi-GPU systems utilizing GPU-aware MPI, NCCL, RCCL, or NVSHMEM.
 
 ## Implementation Details
 
 ### NVIDIA GPUs
-* **Core:** CUDA implementations of CG and pipelined CG.
+* **Core:** CUDA implementations of CG, pipelined CG, and pipelined BiCGStab.
 * **Communication:**
     * **Host-initiated:** GPU-aware MPI, NCCL, or NVSHMEM.
     * **Device-initiated:** NVSHMEM (performed directly by the GPU).
 
 ### AMD GPUs
-* **Core:** HIP implementations of CG and pipelined CG.
+* **Core:** HIP implementations of CG, pipelined CG, and pipelined BiCGStab.
 * **Communication:**
     * **Host-initiated:** GPU-aware MPI or RCCL.
 
@@ -21,13 +21,30 @@ Please see the file `INSTALL` for instructions on how to build and install the s
 ## License
 aCG is free software, available under a permissive software license. See the file `LICENSE` for copying conditions.
 
-## Reference
-If you use aCG in your research, please cite the following paper:
+## References
+If you use aCG in your research, please cite the following papers.
+
+The pipelined preconditioned CG (Pipe-PCG) and pipelined BiCGStab (Pipe-BiCGStab) solvers with triple overlap of collective communication, point-to-point communication, and computation are described in:
+
+> Sinan Ekmekçibaşı, James D. Trotter, Johannes Langguth, Xing Cai, and Didem Unat. 2026. **Triple Overlap in Pipelined Krylov Methods on Multi-GPU Systems.** Accepted to the *SC26 Workshops (IA^3 Workshop)*. arXiv:2610.25058. https://doi.org/10.48550/arXiv.2610.25058
+
+The CPU- and GPU-initiated communication strategies for CG are described in:
 
 > James D. Trotter, Sinan Ekmekçibaşı, Doğan Sağbili, Johannes Langguth, Xing Cai, and Didem Unat. 2025. **CPU- and GPU-initiated Communication Strategies for Conjugate Gradient Methods on Large GPU Clusters.** In *Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (SC '25)*. Association for Computing Machinery, New York, NY, USA, 298–315. https://doi.org/10.1145/3712285.3759774
 
 ### BibTeX
 ```bibtex
+@misc{Ekmekcibasi2026,
+  author        = {Ekmek\c{c}iba\c{s}\i, Sinan and Trotter, James D. and Langguth, Johannes and Cai, Xing and Unat, Didem},
+  title         = {Triple Overlap in Pipelined Krylov Methods on Multi-GPU Systems},
+  year          = {2026},
+  eprint        = {2610.25058},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.DC},
+  doi           = {10.48550/arXiv.2610.25058},
+  note          = {Accepted to SC26-W, IA^3 Workshop}
+}
+
 @inproceedings{Trotter2025,
   author    = {Trotter, James D. and Ekmek\c{c}iba\c{s}\i, Sinan and Sa\u{g}bili, Do\u{g}an and Langguth, Johannes and Cai, Xing and Unat, Didem},
   title     = {CPU- and GPU-initiated Communication Strategies for Conjugate Gradient Methods on Large GPU Clusters},
@@ -38,3 +55,4 @@ If you use aCG in your research, please cite the following paper:
   pages     = {298--315},
   doi       = {10.1145/3712285.3759774}
 }
+```
