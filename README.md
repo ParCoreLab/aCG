@@ -35,7 +35,7 @@ The CPU- and GPU-initiated communication strategies for CG are described in:
 ### BibTeX
 ```bibtex
 
-@INPROCEEDINGS {,
+@INPROCEEDINGS {Ekmekcibasi2026,
 author = { Ekmekçibaşi, Sinan and Trotter, James D. and Langguth, Johannes and Cai, Xing and Unat, Didem },
 booktitle = { SC26-W: Workshops of the International Conference for High Performance Computing, Networking, Storage and Analysis },
 title = {{ Triple Overlap in Pipelined Krylov Methods on Multi-GPU Systems }},
